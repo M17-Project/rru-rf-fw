@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <math.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -67,7 +68,51 @@ static void MX_USART3_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void dbg_print(const uint8_t* str)
+{
+	HAL_UART_Transmit(&huart3, str, strlen((char*)str), 100);
+}
 
+//set rf power output setpoint
+//0 - lowest power, 0xFFF - max power
+void set_rf_pwr_setpoint(uint16_t pwr)
+{
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFFF:pwr);
+	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+}
+
+float get_ref_pwr(void)
+{
+	//TODO
+
+	return 0.0f;
+}
+
+float get_fwd_pwr(void)
+{
+	//TODO
+
+	return 0.0f;
+}
+
+//calculate SWR based on fwd and ref power
+//returns 0.0 when input data is invalid
+float calc_swr(float fwd, float ref)
+{
+	float s=sqrtf(ref/fwd);
+	float swr=(1.0f+s)/(1.0f-s);
+
+	return swr>=1.0f?swr:0.0f;
+}
+
+//enable RF PA (assert one of two enable signals)
+void rf_pa_en(uint8_t en)
+{
+	if(en)
+		PA_EN_GPIO_Port->BSRR=(uint32_t)PA_EN_Pin;
+	else
+		PA_EN_GPIO_Port->BSRR=(uint32_t)PA_EN_Pin<<16;
+}
 /* USER CODE END 0 */
 
 /**
@@ -104,13 +149,24 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  set_rf_pwr_setpoint(0);
+  rf_pa_en(0);
+  DBG_TP1_GPIO_Port->BSRR=(uint32_t)DBG_TP1_Pin<<16;
+  DBG_TP2_GPIO_Port->BSRR=(uint32_t)DBG_TP2_Pin<<16;
+  HAL_Delay(100);
+  dbg_print((const uint8_t*)"Hello world, this is your rru-rf board.\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  DBG_TP1_GPIO_Port->BSRR=(uint32_t)DBG_TP1_Pin;
+	  DBG_TP2_GPIO_Port->BSRR=(uint32_t)DBG_TP2_Pin<<16;
+	  HAL_Delay(100);
+	  DBG_TP1_GPIO_Port->BSRR=(uint32_t)DBG_TP1_Pin<<16;
+	  DBG_TP2_GPIO_Port->BSRR=(uint32_t)DBG_TP2_Pin;
+	  HAL_Delay(100);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -243,7 +299,7 @@ static void MX_DAC_Init(void)
 
   /** DAC channel OUT1 config
   */
-  sConfig.DAC_Trigger = DAC_TRIGGER_NONE;
+  sConfig.DAC_Trigger = DAC_TRIGGER_SOFTWARE;
   sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
   if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
   {
@@ -382,12 +438,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, TP1_Pin|TP2_Pin|RX_nCS_Pin|TX_nCS_Pin
+  HAL_GPIO_WritePin(GPIOB, DBG_TP1_Pin|DBG_TP2_Pin|RX_nCS_Pin|TX_nCS_Pin
                           |PA_EN_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : TP1_Pin TP2_Pin RX_nCS_Pin TX_nCS_Pin
+  /*Configure GPIO pins : DBG_TP1_Pin DBG_TP2_Pin RX_nCS_Pin TX_nCS_Pin
                            PA_EN_Pin */
-  GPIO_InitStruct.Pin = TP1_Pin|TP2_Pin|RX_nCS_Pin|TX_nCS_Pin
+  GPIO_InitStruct.Pin = DBG_TP1_Pin|DBG_TP2_Pin|RX_nCS_Pin|TX_nCS_Pin
                           |PA_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;

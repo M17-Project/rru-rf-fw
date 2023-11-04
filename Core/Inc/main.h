@@ -57,10 +57,22 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define TP1_Pin GPIO_PIN_1
-#define TP1_GPIO_Port GPIOB
-#define TP2_Pin GPIO_PIN_2
-#define TP2_GPIO_Port GPIOB
+#define FWD_SENSE_Pin GPIO_PIN_0
+#define FWD_SENSE_GPIO_Port GPIOA
+#define REF_SENSE_Pin GPIO_PIN_1
+#define REF_SENSE_GPIO_Port GPIOA
+#define TEMP_SENSE_Pin GPIO_PIN_2
+#define TEMP_SENSE_GPIO_Port GPIOA
+#define RF_PWR_SP_Pin GPIO_PIN_4
+#define RF_PWR_SP_GPIO_Port GPIOA
+#define DBG_TP1_Pin GPIO_PIN_1
+#define DBG_TP1_GPIO_Port GPIOB
+#define DBG_TP2_Pin GPIO_PIN_2
+#define DBG_TP2_GPIO_Port GPIOB
+#define DBG_TX_Pin GPIO_PIN_10
+#define DBG_TX_GPIO_Port GPIOB
+#define DBG_RX_Pin GPIO_PIN_11
+#define DBG_RX_GPIO_Port GPIOB
 #define RX_nCS_Pin GPIO_PIN_6
 #define RX_nCS_GPIO_Port GPIOB
 #define TX_nCS_Pin GPIO_PIN_7
