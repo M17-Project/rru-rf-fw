@@ -85,10 +85,10 @@ enum strobe_t
 
 struct trx_data_t
 {
-	uint8_t pn;				//detected part number
-	uint8_t name[8];		//name (CC1200, CC1201, unknown)
+	uint8_t name[8];		//chip's name (CC1200, CC1201, unknown)
 	uint32_t frequency;		//frequency in hertz
 	uint8_t pwr;			//power setting (3..63)
+	int16_t fcorr;			//frequency correction
 }trx_data[2];
 
 /* USER CODE END PV */
@@ -198,14 +198,26 @@ void set_CS(enum trx_t trx, uint8_t state)
 
 uint8_t trx_readreg(enum trx_t trx, uint16_t addr)
 {
-	uint8_t txd[3]={(addr>>8)|0x80, addr&0xFF, 0};
+	uint8_t txd[3]={0, 0, 0};
 	uint8_t rxd[3]={0, 0, 0};
 
 	set_CS(trx, 0);
-	HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 3, 10);
+	if((addr>>8)==0)
+	{
+		txd[0]=(addr&0xFF)|0x80;
+		txd[1]=0;
+		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 2, 10);
+		return rxd[1];
+	}
+	else
+	{
+		txd[0]=((addr>>8)&0xFF)|0x80;
+		txd[1]=addr&0xFF;
+		txd[2]=0;
+		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 3, 10);
+		return rxd[2];
+	}
 	set_CS(trx, 1);
-
-	return rxd[2];
 }
 
 void trx_writereg(enum trx_t trx, uint16_t addr, uint8_t val)
@@ -213,7 +225,19 @@ void trx_writereg(enum trx_t trx, uint16_t addr, uint8_t val)
 	uint8_t txd[3]={addr>>8, addr&0xFF, val};
 
 	set_CS(trx, 0);
-	HAL_SPI_Transmit(&hspi1, txd, 3, 10);
+	if((addr>>8)==0)
+	{
+		txd[0]=addr&0xFF;
+		txd[1]=val;
+		HAL_SPI_Transmit(&hspi1, txd, 2, 10);
+	}
+	else
+	{
+		txd[0]=(addr>>8)&0xFF;
+		txd[1]=addr&0xFF;
+		txd[2]=val;
+		HAL_SPI_Transmit(&hspi1, txd, 3, 10);
+	}
 	set_CS(trx, 1);
 }
 
@@ -265,14 +289,15 @@ void detect_ic(uint8_t* rx, uint8_t* tx)
 
 void config_ic(enum trx_t trx, uint8_t* settings)
 {
-	for(uint8_t i=0; i<50; i++)
+	for(uint8_t i=0; i<51; i++)
 	{
-		/*uint8_t msg[64];
-		sprintf((char*)msg, "[%03d] 0x%02X 0x%02X 0x%02X\n",
-				i*3, settings[i*3], settings[i*3+1], settings[i*3+2]);
-		dbg_print(msg);*/
+		//dbg_print("[%03d] 0x%02X 0x%02X 0x%02X\n",
+		//		i*3, settings[i*3], settings[i*3+1], settings[i*3+2]);
 		set_CS(trx, 0);
-		HAL_SPI_Transmit(&hspi1, (uint8_t*)&settings[i*3], 3, 10);
+		if(settings[i*3])
+			HAL_SPI_Transmit(&hspi1, &settings[i*3], 3, 10);
+		else
+			HAL_SPI_Transmit(&hspi1, &settings[i*3+1], 2, 10);
 		set_CS(trx, 1);
 		HAL_Delay(10);
 	}
@@ -282,7 +307,7 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 {
 	uint32_t freq_word=0;
 
-	static uint8_t cc1200_rx_settings[50*3] =
+	static uint8_t cc1200_rx_settings[51*3] =
 	{
 		0x00, 0x01, 0x08,
 		0x00, 0x03, 0x09,
@@ -313,6 +338,7 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x02, //AFC, 0x22 - on, 0x02 - off
+		0x2F, 0x04, 0x0C, //oscillator frequency is 40 MHz
 		0x2F, 0x05, 0x0D,
 		0x2F, 0x0C, 0x57, //freq round((float)435000000/5000000*(1<<16))
 		0x2F, 0x0D, 0x00, //freq
@@ -336,7 +362,7 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		0x2F, 0x91, 0x08,
 	};
 
-	static uint8_t cc1200_tx_settings[50*3] =
+	static uint8_t cc1200_tx_settings[51*3] =
 	{
 		0x00, 0x01, 0x08,
 		0x00, 0x03, 0x09,
@@ -367,6 +393,7 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x22,
+		0x2F, 0x04, 0x0C, //oscillator frequency is 40 MHz
 		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
 		0x2F, 0x0C, 0x57, //freq 435M = 0x570000
 		0x2F, 0x0D, 0x00, //freq
@@ -391,15 +418,13 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 	};
 
 	freq_word=roundf((float)frequency/5000000.0*((uint32_t)1<<16));
-	/*uint8_t msg[64];
-	sprintf((char*)msg, "freq_word=%04lX\n", freq_word);
-	dbg_print(msg);*/
+	//dbg_print("freq_word=%04lX\n", freq_word);
 
 	if(trx==CHIP_RX)
 	{
-		cc1200_rx_settings[31*3-1]=(freq_word>>16)&0xFF;
-		cc1200_rx_settings[32*3-1]=(freq_word>>8)&0xFF;
-		cc1200_rx_settings[33*3-1]=freq_word&0xFF;
+		cc1200_rx_settings[32*3-1]=(freq_word>>16)&0xFF;
+		cc1200_rx_settings[33*3-1]=(freq_word>>8)&0xFF;
+		cc1200_rx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_rx_settings);
 	}
 	else if(trx==CHIP_TX)
@@ -407,9 +432,9 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		if(tx_pwr>0x3F) tx_pwr=0x3F;
 		if(tx_pwr<0x03) tx_pwr=0x03;
 		cc1200_tx_settings[26*3-1]=tx_pwr;
-		cc1200_tx_settings[31*3-1]=(freq_word>>16)&0xFF;
-		cc1200_tx_settings[32*3-1]=(freq_word>>8)&0xFF;
-		cc1200_tx_settings[33*3-1]=freq_word&0xFF;
+		cc1200_tx_settings[32*3-1]=(freq_word>>16)&0xFF;
+		cc1200_tx_settings[33*3-1]=(freq_word>>8)&0xFF;
+		cc1200_tx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_tx_settings);
 	}
 }
@@ -459,7 +484,7 @@ int main(void)
   HAL_Delay(100);
   trx_writecmd(CHIP_RX, STR_SRES);
   trx_writecmd(CHIP_TX, STR_SRES);
-  dbg_print("Hello world, this is your rru-rf board.\n");
+  dbg_print("Hello world, this is your rru-rf board\n");
 
   HAL_Delay(100);
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
@@ -467,20 +492,38 @@ int main(void)
 
   trx_data[CHIP_RX].frequency=438812500-7600000;
   trx_data[CHIP_TX].frequency=438812500;
+  trx_data[CHIP_RX].fcorr=-12;
+  trx_data[CHIP_TX].fcorr=-12;
   trx_data[CHIP_TX].pwr=30;
+
+  dbg_print("Starting TRX config...\n");
 
   config_rf(CHIP_RX, trx_data[CHIP_RX].frequency, trx_data[CHIP_RX].pwr);
   config_rf(CHIP_TX, trx_data[CHIP_TX].frequency, trx_data[CHIP_TX].pwr);
+  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
+  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
+  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
+  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
+
+  dbg_print("Done\n");
 
   HAL_Delay(50);
   trx_writecmd(CHIP_RX, STR_SRX);
   trx_writecmd(CHIP_TX, STR_STX);
 
   HAL_Delay(50);
-  dbg_print("\nfreq_word is %02X%02X%02X\n",
-		  trx_readreg(CHIP_TX, 0x2F0C), trx_readreg(CHIP_TX, 0x2F0D), trx_readreg(CHIP_TX, 0x2F0E));
-  dbg_print("state is %02X\n",
-		  read_status(CHIP_TX));
+  /*dbg_print("\nTX freq_word is %02X%02X%02X\n",
+		trx_readreg(CHIP_TX, 0x2F0C), trx_readreg(CHIP_TX, 0x2F0D), trx_readreg(CHIP_TX, 0x2F0E));
+  dbg_print("TX state is %02X\n",
+		read_status(CHIP_TX));
+  dbg_print("ECG_CFG = %02X\n",
+		trx_readreg(CHIP_TX, 0x2F04));
+  dbg_print("XOSC1 = %02X\n",
+  		trx_readreg(CHIP_TX, 0x2F36));
+  dbg_print("FS_CFG = %02X\n",
+	    trx_readreg(CHIP_TX, 0x0020));*/
+  trx_readreg(CHIP_TX, 0x2F8D)%2 ? dbg_print("PLL locked\n") : dbg_print("PLL unlocked\n"); //FSCAL_CTRL
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
