@@ -89,6 +89,7 @@ struct trx_data_t
 	uint32_t frequency;		//frequency in hertz
 	uint8_t pwr;			//power setting (3..63)
 	int16_t fcorr;			//frequency correction
+	uint8_t pll_locked;		//PLL locked flag
 }trx_data[2];
 
 /* USER CODE END PV */
@@ -123,7 +124,7 @@ void dbg_print(const char* fmt, ...)
 //0 - lowest power, 0xFFF - max power
 void set_rf_pwr_setpoint(uint16_t pwr)
 {
-	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFFF:pwr);
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFFF:(pwr<<4));
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
 }
 
@@ -490,15 +491,15 @@ int main(void)
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
   dbg_print("Detected RF ICs:\nRX - %s\nTX - %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
 
-  trx_data[CHIP_RX].frequency=438812500-7600000;
-  trx_data[CHIP_TX].frequency=438812500;
+  trx_data[CHIP_RX].frequency=435000000-7600000;
+  trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=-12;
   trx_data[CHIP_TX].fcorr=-12;
-  trx_data[CHIP_TX].pwr=30;
+  trx_data[CHIP_TX].pwr=0x3F; //0x03 to 0x3F
 
   dbg_print("Starting TRX config...\n");
 
-  config_rf(CHIP_RX, trx_data[CHIP_RX].frequency, trx_data[CHIP_RX].pwr);
+  //config_rf(CHIP_RX, trx_data[CHIP_RX].frequency, trx_data[CHIP_RX].pwr);
   config_rf(CHIP_TX, trx_data[CHIP_TX].frequency, trx_data[CHIP_TX].pwr);
   trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
   trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
@@ -512,17 +513,18 @@ int main(void)
   trx_writecmd(CHIP_TX, STR_STX);
 
   HAL_Delay(50);
-  /*dbg_print("\nTX freq_word is %02X%02X%02X\n",
-		trx_readreg(CHIP_TX, 0x2F0C), trx_readreg(CHIP_TX, 0x2F0D), trx_readreg(CHIP_TX, 0x2F0E));
-  dbg_print("TX state is %02X\n",
-		read_status(CHIP_TX));
-  dbg_print("ECG_CFG = %02X\n",
-		trx_readreg(CHIP_TX, 0x2F04));
-  dbg_print("XOSC1 = %02X\n",
-  		trx_readreg(CHIP_TX, 0x2F36));
-  dbg_print("FS_CFG = %02X\n",
-	    trx_readreg(CHIP_TX, 0x0020));*/
-  trx_readreg(CHIP_TX, 0x2F8D)%2 ? dbg_print("PLL locked\n") : dbg_print("PLL unlocked\n"); //FSCAL_CTRL
+  trx_data[CHIP_RX].pll_locked = trx_readreg(CHIP_RX, 0x2F8D)%2; //FSCAL_CTRL
+  trx_data[CHIP_TX].pll_locked = trx_readreg(CHIP_TX, 0x2F8D)%2;
+  trx_data[CHIP_RX].pll_locked ? dbg_print("RX PLL locked\n") : dbg_print("RX PLL unlocked\n");
+  trx_data[CHIP_TX].pll_locked ? dbg_print("TX PLL locked\n") : dbg_print("TX PLL unlocked\n");
+
+  if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
+  {
+	  dbg_print("ERROR: At least one PLL didn't lock\nHalting\n");
+	  while(1);
+  }
+
+  rf_pa_en(1);
 
   /* USER CODE END 2 */
 
@@ -530,12 +532,15 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  //dbg_print("Status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
 	  set_TP(TP1, 1);
 	  set_TP(TP2, 0);
+	  set_rf_pwr_setpoint(0);
 	  HAL_Delay(1000);
 	  set_TP(TP1, 0);
 	  set_TP(TP2, 1);
-	  HAL_Delay(1000);
+	  set_rf_pwr_setpoint(190);
+	  HAL_Delay(5000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
