@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -171,6 +172,7 @@ uint8_t cc1200_tx_settings[50*3] =
 	0x2F, 0x91, 0x08,
 };
 
+uint8_t rx_name[8]={0}, tx_name[8]={0}; //detected chip names
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -269,6 +271,43 @@ void set_CS(enum trx_t trx, uint8_t state)
 	}
 }
 
+uint8_t trx_readreg(void)
+{
+	return 0;
+}
+
+uint8_t read_pn(enum trx_t trx)
+{
+	const uint8_t txd[3]={0x2F|0x80, 0x8F, 0};
+	uint8_t rxd[3]={0, 0, 0};
+
+	set_CS(trx, 0);
+	HAL_SPI_TransmitReceive(&hspi1, (uint8_t*)txd, rxd, 3, 10);
+	set_CS(trx, 1);
+
+	return rxd[2];
+}
+
+void detect_ic(uint8_t* rx, uint8_t* tx)
+{
+	uint8_t rxid=read_pn(CHIP_RX);
+	uint8_t txid=read_pn(CHIP_TX);
+
+	if(rxid==0x20)
+		sprintf((char*)rx, "CC1200");
+	else if(rxid==0x21)
+		sprintf((char*)rx, "CC1201");
+	else
+		sprintf((char*)rx, "unknown");
+
+	if(txid==0x20)
+		sprintf((char*)tx, "CC1200");
+	else if(txid==0x21)
+		sprintf((char*)tx, "CC1201");
+	else
+		sprintf((char*)tx, "unknown");
+}
+
 void config_rf(enum trx_t trx, uint32_t frequency)
 {
 	if(trx==CHIP_RX)
@@ -324,6 +363,12 @@ int main(void)
   set_TP(TP2, 0);
   HAL_Delay(100);
   dbg_print((const uint8_t*)"Hello world, this is your rru-rf board.\n");
+
+  HAL_Delay(100);
+  uint8_t str[64];
+  detect_ic(rx_name, tx_name);
+  sprintf((char*)str, "Detected RF ICs:\nRX - %s\nTX - %s\n", rx_name, tx_name);
+  dbg_print((const uint8_t*)str);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -504,12 +549,13 @@ static void MX_SPI1_Init(void)
   /* USER CODE END SPI1_Init 1 */
   /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_SLAVE;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
   hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
