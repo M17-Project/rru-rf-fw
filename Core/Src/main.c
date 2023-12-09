@@ -124,7 +124,7 @@ void dbg_print(const char* fmt, ...)
 //0 - lowest power, 0xFFF - max power
 void set_rf_pwr_setpoint(uint16_t pwr)
 {
-	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFFF:(pwr<<4));
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFF:pwr);
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
 }
 
@@ -539,7 +539,7 @@ int main(void)
 	  HAL_Delay(1000);
 	  set_TP(TP1, 0);
 	  set_TP(TP2, 1);
-	  set_rf_pwr_setpoint(190);
+	  set_rf_pwr_setpoint(3040);
 	  HAL_Delay(5000);
     /* USER CODE END WHILE */
 
