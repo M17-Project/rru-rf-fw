@@ -39,7 +39,7 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define FIX_TIMER_TRIGGER(handle_ptr) (__HAL_TIM_CLEAR_FLAG(handle_ptr, TIM_SR_UIF))
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -48,6 +48,8 @@ ADC_HandleTypeDef hadc1;
 DAC_HandleTypeDef hdac;
 
 SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
@@ -92,6 +94,10 @@ struct trx_data_t
 	uint8_t pll_locked;		//PLL locked flag
 }trx_data[2];
 
+volatile uint8_t rxb[100];
+volatile uint8_t rx_bc=0;
+
+volatile uint8_t rx_tot=0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,6 +108,7 @@ static void MX_DAC_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -439,6 +446,31 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		config_ic(trx, cc1200_tx_settings);
 	}
 }
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	HAL_TIM_Base_Stop_IT(&htim6);
+	rx_tot=1;
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if(huart->Instance==USART1)
+	{
+		rx_bc++;
+
+		//provide 1ms timeout timer
+		TIM6->CNT=0;
+		FIX_TIMER_TRIGGER(&htim6);
+		HAL_TIM_Base_Start_IT(&htim6);
+
+		//handle overflow
+		if(rx_bc<sizeof(rxb))
+			HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxb[rx_bc], 1);
+		else
+			rx_tot=1; //same flag for OVF and TOT
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -474,6 +506,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   set_rf_pwr_setpoint(0);
   rf_pa_en(0);
@@ -526,21 +559,87 @@ int main(void)
 
   rf_pa_en(1);
 
+  memset((uint8_t*)rxb, 0, sizeof(rxb));
+  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
+  while(1)
   {
+	  if(rx_tot)
+	  {
+		  HAL_UART_AbortReceive_IT(&huart1);
+		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
+		  rx_tot=0;
+
+		  //if a valid MMDVM frame is detected
+		  if(rxb[0]==0xE0 && rxb[1]==rx_bc)
+		  {
+			  //dbg_print("type 0x%02X\tlen %02d\n", rxb[2], rxb[1]);
+
+			  uint8_t cmd=rxb[2];
+
+			  if(cmd==0x00) //"Get Version"
+			  {
+				  //reply with RRU ident string
+				  uint8_t ident[70];
+				  sprintf((char*)&ident[4],
+						  "RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP");
+				  ident[0]=0xE0; //header
+				  ident[2]=0x00; //a reply to "Get Version" command
+				  ident[3]=0x01; //protocol version
+				  ident[1]=strlen((char*)&ident[4])+4; //total length
+
+				  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
+			  }
+			  else if(cmd==0x04) //"???"
+			  {
+				  //just ACK it, lol
+				  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
+
+				  HAL_UART_Transmit_IT(&huart1, ack, 4);
+			  }
+			  else if(cmd==0x02) //"Set Config"
+			  {
+				  //for now just reply with an ACK
+				  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
+
+				  HAL_UART_Transmit_IT(&huart1, ack, 4);
+			  }
+			  else if(cmd==0x03) //"Set Mode"
+			  {
+				  //for now just reply with an ACK
+				  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
+
+				  HAL_UART_Transmit_IT(&huart1, ack, 4);
+			  }
+			  else if(cmd==0x01) //"Get Status"
+			  {
+				  //reply with a hardcoded sequence as theres no rx yet
+				  uint8_t reply[14]={0xE0, 0x0E, 0x01, 0x80,
+				  	  	  	  	  	0x00, 0x00, 0x00, 0x00,
+									0x00, 0x00, 0x00, 0x00,
+				  	  	  	  	  	0x00, 0x1F};
+
+				  HAL_UART_Transmit_IT(&huart1, reply, 14);
+			  }
+		  }
+
+		  //memset((uint8_t*)rxb, 0, sizeof(rxb));
+		  rx_bc=0;
+	  }
+
 	  //dbg_print("Status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
-	  set_TP(TP1, 1);
+	  /*set_TP(TP1, 1);
 	  set_TP(TP2, 0);
 	  set_rf_pwr_setpoint(0);
 	  HAL_Delay(1000);
 	  set_TP(TP1, 0);
 	  set_TP(TP2, 1);
-	  set_rf_pwr_setpoint(3040);
-	  HAL_Delay(5000);
+	  set_rf_pwr_setpoint(3000);
+	  HAL_Delay(5000);*/
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -727,6 +826,44 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 8400-1;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 10-1;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
 
 }
 
