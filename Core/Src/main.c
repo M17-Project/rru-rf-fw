@@ -34,7 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define VDDA		(3.24f)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,6 +44,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
 DAC_HandleTypeDef hdac;
 
@@ -94,15 +95,32 @@ struct trx_data_t
 	uint8_t pll_locked;		//PLL locked flag
 }trx_data[2];
 
+//PA
+uint16_t alc_set=3000;
+
+//MMDVM stuff
 volatile uint8_t rxb[100];
 volatile uint8_t rx_bc=0;
-
 volatile uint8_t rx_tot=0;
+
+//ADC stuff
+uint32_t adc_vals[3]={0, 0, 0};
+
+//RF power sense cal data (consts for now) P(U) = a*U + b + cal_atten + cal_corr
+//based on 2-point linear approximation
+//U[V]		P[dBm]
+//0.64		0.0
+//1.85		-50.0
+const float cal_a		= -41.3223140495868f;	//dBm/V
+const float cal_b		= 26.4462809917355f;	//dBm
+const float cal_offs	= 62.5f;				//dB
+const float cal_corr	= -3.6f;				//dB
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_DAC_Init(void);
 static void MX_SPI1_Init(void);
@@ -135,28 +153,35 @@ void set_rf_pwr_setpoint(uint16_t pwr)
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
 }
 
-float get_ref_pwr(void)
+void get_rf_pwr_dbm(float* pwr_fwd, float* pwr_ref)
 {
-	//TODO
+	uint32_t values[3];
+	HAL_ADC_Start_DMA(&hadc1, values, 3);
+	HAL_ADC_PollForConversion(&hadc1, 20);
 
-	return 0.0f;
-}
+	//dbg_print("[DBG] %ld, %ld\n", values[0], values[1]);
 
-float get_fwd_pwr(void)
-{
-	//TODO
-
-	return 0.0f;
+	*pwr_fwd=cal_a*(values[0]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr; //take coupling and attenuation into account
+	*pwr_ref=cal_a*(values[1]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr;
 }
 
 //calculate SWR based on fwd and ref power
 //returns 0.0 when input data is invalid
 float calc_swr(float fwd, float ref)
 {
+	//in an ideal world this would be physically impossible
+	//but there's always some measurement error that could cause this
+	if(ref>=fwd)
+		return INFINITY;
+
+	//dBm to watts
+	fwd=powf(10.0f, fwd/10.0f-3.0f);
+	ref=powf(10.0f, ref/10.0f-3.0f);
+
 	float s=sqrtf(ref/fwd);
 	float swr=(1.0f+s)/(1.0f-s);
 
-	return swr>=1.0f?swr:0.0f;
+	return swr;
 }
 
 //enable RF PA (assert one of two enable signals)
@@ -311,7 +336,7 @@ void config_ic(enum trx_t trx, uint8_t* settings)
 	}
 }
 
-void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
+void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 {
 	uint32_t freq_word=0;
 
@@ -425,7 +450,7 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		0x2F, 0x91, 0x08,
 	};
 
-	freq_word=roundf((float)frequency/5000000.0*((uint32_t)1<<16));
+	freq_word=roundf((float)trx_data.frequency/5000000.0*((uint32_t)1<<16));
 	//dbg_print("freq_word=%04lX\n", freq_word);
 
 	if(trx==CHIP_RX)
@@ -437,6 +462,7 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 	}
 	else if(trx==CHIP_TX)
 	{
+		uint8_t tx_pwr=trx_data.pwr;
 		if(tx_pwr>0x3F) tx_pwr=0x3F;
 		if(tx_pwr<0x03) tx_pwr=0x03;
 		cc1200_tx_settings[26*3-1]=tx_pwr;
@@ -445,6 +471,9 @@ void config_rf(enum trx_t trx, uint32_t frequency, uint8_t tx_pwr)
 		cc1200_tx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_tx_settings);
 	}
+
+	trx_writereg(trx, 0x2F0A, (uint16_t)trx_data.fcorr>>8);
+	trx_writereg(trx, 0x2F0B, (uint16_t)trx_data.fcorr&0xFF);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -501,6 +530,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_DAC_Init();
   MX_SPI1_Init();
@@ -524,20 +554,16 @@ int main(void)
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
   dbg_print("Detected RF ICs:\nRX - %s\nTX - %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
 
-  trx_data[CHIP_RX].frequency=435000000-7600000;
+  trx_data[CHIP_RX].frequency=435000000; //default
   trx_data[CHIP_TX].frequency=435000000;
-  trx_data[CHIP_RX].fcorr=-12;
-  trx_data[CHIP_TX].fcorr=-12;
-  trx_data[CHIP_TX].pwr=0x3F; //0x03 to 0x3F
+  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-12; //shared clock source
+  trx_data[CHIP_TX].pwr=63; //3 to 63
+  alc_set=3000; //0 - no output, 3000 - about 47.8dBm (60W)
 
   dbg_print("Starting TRX config...\n");
 
-  //config_rf(CHIP_RX, trx_data[CHIP_RX].frequency, trx_data[CHIP_RX].pwr);
-  config_rf(CHIP_TX, trx_data[CHIP_TX].frequency, trx_data[CHIP_TX].pwr);
-  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
-  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
-  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
-  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
+  config_rf(CHIP_RX, trx_data[CHIP_RX]);
+  config_rf(CHIP_TX, trx_data[CHIP_TX]);
 
   dbg_print("Done\n");
 
@@ -557,8 +583,10 @@ int main(void)
 	  while(1);
   }
 
+  //dbg_print("TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
   rf_pa_en(1);
 
+  //enable MMDVM comms over UART1
   memset((uint8_t*)rxb, 0, sizeof(rxb));
   HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 
@@ -566,6 +594,26 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  while(1) //test
+  {
+	  float fwd=0.0, ref=0.0, swr=0.0;
+
+	  set_rf_pwr_setpoint(0);
+	  HAL_Delay(1000);
+	  //get_rf_pwr_dbm(&fwd, &ref);
+	  //swr=calc_swr(fwd, ref);
+	  //dbg_print("FWD=%2.1fdBm REF=%2.1fdBm, SWR=%-.--f\n", fwd, ref);
+
+	  set_rf_pwr_setpoint(2500);
+	  HAL_Delay(5000);
+	  get_rf_pwr_dbm(&fwd, &ref);
+	  swr=calc_swr(fwd, ref);
+	  if(swr<10.0f)
+		  dbg_print("FWD=%2.1fdBm REF=%2.1fdBm, SWR=%2.2f\n", fwd, ref, swr);
+	  else
+		  dbg_print("FWD=%2.1fdBm REF=%2.1fdBm, SWR>=10.0\n", fwd, ref);
+  }
+
   while(1)
   {
 	  if(rx_tot)
@@ -594,11 +642,23 @@ int main(void)
 
 				  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
 			  }
-			  else if(cmd==0x04) //"???"
+			  else if(cmd==0x04) //"???" - set RX/TX frequencies etc.
 			  {
-				  //just ACK it, lol
-				  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
+				  uint32_t rx_freq, tx_freq;
 
+				  memcpy((uint8_t*)&rx_freq, (uint8_t*)&rxb[4], sizeof(uint32_t));
+				  memcpy((uint8_t*)&tx_freq, (uint8_t*)&rxb[8], sizeof(uint32_t));
+
+				  dbg_print("MMDVM CMD RX: %ld, TX: %ld\n", rx_freq, tx_freq);
+
+				  //reconfig TRXs
+				  trx_data[CHIP_RX].frequency=rx_freq;
+				  trx_data[CHIP_TX].frequency=tx_freq;
+				  config_rf(CHIP_RX, trx_data[CHIP_RX]);
+				  config_rf(CHIP_TX, trx_data[CHIP_TX]);
+
+				  //ACK it
+				  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
 				  HAL_UART_Transmit_IT(&huart1, ack, 4);
 			  }
 			  else if(cmd==0x02) //"Set Config"
@@ -617,7 +677,7 @@ int main(void)
 			  }
 			  else if(cmd==0x01) //"Get Status"
 			  {
-				  //reply with a hardcoded sequence as theres no rx yet
+				  //reply with a hardcoded sequence
 				  uint8_t reply[14]={0xE0, 0x0E, 0x01, 0x80,
 				  	  	  	  	  	0x00, 0x00, 0x00, 0x00,
 									0x00, 0x00, 0x00, 0x00,
@@ -625,21 +685,15 @@ int main(void)
 
 				  HAL_UART_Transmit_IT(&huart1, reply, 14);
 			  }
+			  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
+			  {
+				  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
+			  }
 		  }
 
 		  //memset((uint8_t*)rxb, 0, sizeof(rxb));
 		  rx_bc=0;
 	  }
-
-	  //dbg_print("Status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
-	  /*set_TP(TP1, 1);
-	  set_TP(TP2, 0);
-	  set_rf_pwr_setpoint(0);
-	  HAL_Delay(1000);
-	  set_TP(TP1, 0);
-	  set_TP(TP2, 1);
-	  set_rf_pwr_setpoint(3000);
-	  HAL_Delay(5000);*/
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -715,15 +769,15 @@ static void MX_ADC1_Init(void)
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.NbrOfConversion = 3;
   hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -733,7 +787,25 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = 2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = 3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -930,6 +1002,22 @@ static void MX_USART3_UART_Init(void)
   /* USER CODE BEGIN USART3_Init 2 */
 
   /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
 
