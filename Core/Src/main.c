@@ -34,7 +34,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define VDDA		(3.24f)
+#define VDDA			(3.24f)					//measured VDDA voltage
+#define M17_BUFLEN		12						//M17 buffer depth in frames
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -103,23 +104,26 @@ enum tx_state_t
 };
 
 //PA
-uint16_t alc_set=0;
+uint16_t alc_set=0;								//automatic level control setting (nonlinear)
 
 //MMDVM stuff
-volatile uint8_t rxb[100];
-volatile uint8_t rx_bc=0;
-volatile uint8_t rx_tot=0;
-#define M17_BUFLEN		12
-volatile uint8_t m17_buf[M17_BUFLEN][48]={0};
-volatile uint8_t m17_buf_idx=0;
-volatile uint32_t m17_frames=0;
-volatile enum tx_state_t tx_state=TX_IDLE;
+volatile uint8_t rxb[100];						//rx buffer for MMDVM data
+volatile uint8_t rx_bc=0;						//UART1 rx byte counter
+volatile uint8_t rx_tot=0;						//MMDVM comms (UART1) timeout flag
+uint8_t m17_buf[M17_BUFLEN][48]={0};			//M17 frame buffer
+uint8_t m17_buf_idx_wr=0;						//current frame buffer index (for writing)
+uint8_t m17_buf_idx_rd=0;						//current frame buffer index (for reading)
+uint32_t m17_symbols=0;							//how many symbols (frames*192) has been received so far
+uint32_t m17_samples=0;							//capacity for over 24 hours of transmitting
+enum tx_state_t tx_state=TX_IDLE;				//transmitter state
+volatile uint8_t bsb_pend=0;					//do we need to transmit another baseband sample?
 
 //ADC stuff
-uint32_t adc_vals[3]={0};
+uint32_t adc_vals[3]={0};						//raw values read from ADC channels 0, 1, and 2
 
-//RF power sense cal data (consts for now) P(U) = a*U + b + cal_atten + cal_corr
+//AD8318 RF power sensor cal data (consts for now)
 //based on 2-point linear approximation
+//P(U) = a*U + b + cal_atten + cal_corr
 //U[V]		P[dBm]
 //0.64		0.0
 //1.85		-50.0
@@ -515,8 +519,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	//48kHz baseband sampler timer
 	else if(tim==TIM7)
 	{
-		//test
-		HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
+		bsb_pend=1;
 	}
 }
 
@@ -727,22 +730,46 @@ int main(void)
 			  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
 			  {
 				  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
-				  memcpy((uint8_t*)&m17_buf[m17_buf_idx][0], (uint8_t*)&rxb[4], 48);
-				  m17_frames++;
-				  m17_buf_idx++;
-				  m17_buf_idx%=M17_BUFLEN;
+				  memcpy((uint8_t*)&m17_buf[m17_buf_idx_wr][0], (uint8_t*)&rxb[4], 48);
+				  m17_symbols+=192;
+				  m17_buf_idx_wr++;
+				  m17_buf_idx_wr%=M17_BUFLEN;
 				  if(tx_state==TX_IDLE)
 				  {
 					  tx_state=TX_ACTIVE;
 					  TIM7->CNT=0;
 					  FIX_TIMER_TRIGGER(&htim7);
 					  HAL_TIM_Base_Start_IT(&htim7); //48kHz baseband sample timer
+					  set_TP(TP1, 1); //debug
 				  }
 			  }
 		  }
 
 		  //memset((uint8_t*)rxb, 0, sizeof(rxb));
 		  rx_bc=0;
+	  }
+
+	  if(bsb_pend==1)
+	  {
+		  m17_samples++;
+
+		  if(m17_samples==10)
+		  {
+			  ; //take another symbol from the buffer
+
+			  m17_samples=0;
+			  m17_symbols--;
+		  }
+
+		  //nothing else to transmit
+		  if(m17_symbols==0)
+		  {
+			  HAL_TIM_Base_Stop_IT(&htim7); //48kHz baseband sample timer
+			  tx_state=TX_IDLE;
+			  m17_buf_idx_wr=0;
+			  bsb_pend=0;
+			  set_TP(TP1, 0); //debug
+		  }
 	  }
     /* USER CODE END WHILE */
 
