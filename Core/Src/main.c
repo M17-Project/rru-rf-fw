@@ -51,6 +51,7 @@ DAC_HandleTypeDef hdac;
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim6;
+TIM_HandleTypeDef htim7;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
@@ -95,16 +96,27 @@ struct trx_data_t
 	uint8_t pll_locked;		//PLL locked flag
 }trx_data[2];
 
+enum tx_state_t
+{
+	TX_IDLE,
+	TX_ACTIVE
+};
+
 //PA
-uint16_t alc_set=3000;
+uint16_t alc_set=0;
 
 //MMDVM stuff
 volatile uint8_t rxb[100];
 volatile uint8_t rx_bc=0;
 volatile uint8_t rx_tot=0;
+#define M17_BUFLEN		12
+volatile uint8_t m17_buf[M17_BUFLEN][48]={0};
+volatile uint8_t m17_buf_idx=0;
+volatile uint32_t m17_frames=0;
+volatile enum tx_state_t tx_state=TX_IDLE;
 
 //ADC stuff
-uint32_t adc_vals[3]={0, 0, 0};
+uint32_t adc_vals[3]={0};
 
 //RF power sense cal data (consts for now) P(U) = a*U + b + cal_atten + cal_corr
 //based on 2-point linear approximation
@@ -127,6 +139,7 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_TIM7_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -143,6 +156,18 @@ void dbg_print(const char* fmt, ...)
 	va_end(ap);
 
 	HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
+}
+
+//get temperature based on LMT87's output voltage
+float get_temp(void)
+{
+	uint32_t values[3];
+	HAL_ADC_Start_DMA(&hadc1, values, 3);
+	HAL_ADC_PollForConversion(&hadc1, 20);
+
+	float u=values[2]/4096.0f*VDDA;
+
+	return (-13.582f+sqrtf(184.470724f+0.01732f*(2.2308f-u)*1000.0f))/0.00866f + 30.0f;
 }
 
 //set rf power output setpoint
@@ -478,8 +503,21 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	HAL_TIM_Base_Stop_IT(&htim6);
-	rx_tot=1;
+	TIM_TypeDef* tim = htim->Instance;
+
+	//UART1 timeout timer
+	if(tim==TIM6)
+	{
+		HAL_TIM_Base_Stop_IT(&htim6);
+		rx_tot=1;
+	}
+
+	//48kHz baseband sampler timer
+	else if(tim==TIM7)
+	{
+		//test
+		HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
+	}
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -488,7 +526,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	{
 		rx_bc++;
 
-		//provide 1ms timeout timer
+		//provide 0.15ms timeout timer
 		TIM6->CNT=0;
 		FIX_TIMER_TRIGGER(&htim6);
 		HAL_TIM_Base_Start_IT(&htim6);
@@ -537,6 +575,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_TIM6_Init();
+  MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
   set_rf_pwr_setpoint(0);
   rf_pa_en(0);
@@ -558,7 +597,7 @@ int main(void)
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-12; //shared clock source
   trx_data[CHIP_TX].pwr=63; //3 to 63
-  alc_set=3000; //0 - no output, 3000 - about 47.8dBm (60W)
+  //alc_set=3000; //0 - no output, 3000 - about 47.8dBm (60W)
 
   dbg_print("Starting TRX config...\n");
 
@@ -688,6 +727,17 @@ int main(void)
 			  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
 			  {
 				  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
+				  memcpy((uint8_t*)&m17_buf[m17_buf_idx][0], (uint8_t*)&rxb[4], 48);
+				  m17_frames++;
+				  m17_buf_idx++;
+				  m17_buf_idx%=M17_BUFLEN;
+				  if(tx_state==TX_IDLE)
+				  {
+					  tx_state=TX_ACTIVE;
+					  TIM7->CNT=0;
+					  FIX_TIMER_TRIGGER(&htim7);
+					  HAL_TIM_Base_Start_IT(&htim7); //48kHz baseband sample timer
+				  }
 			  }
 		  }
 
@@ -919,7 +969,7 @@ static void MX_TIM6_Init(void)
 
   /* USER CODE END TIM6_Init 1 */
   htim6.Instance = TIM6;
-  htim6.Init.Prescaler = 8400-1;
+  htim6.Init.Prescaler = 1260-1;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim6.Init.Period = 10-1;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -936,6 +986,44 @@ static void MX_TIM6_Init(void)
   /* USER CODE BEGIN TIM6_Init 2 */
 
   /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM7_Init(void)
+{
+
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
+  htim7.Instance = TIM7;
+  htim7.Init.Prescaler = 1-1;
+  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim7.Init.Period = 1750-1;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM7_Init 2 */
+
+  /* USER CODE END TIM7_Init 2 */
 
 }
 
