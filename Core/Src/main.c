@@ -123,7 +123,7 @@ uint8_t m17_buf_idx_rd=0;							//current frame buffer index (for reading)
 uint32_t m17_symbols=0;								//how many symbols (frames*192) have been received so far
 uint32_t m17_samples=0;								//capacity for over 24 hours of transmitting
 enum tx_state_t tx_state=TX_IDLE;					//transmitter state
-volatile uint8_t bsb_pend=0;						//do we need to transmit another baseband sample?
+volatile uint8_t bsb_tx_pend=0;						//do we need to transmit another baseband sample?
 volatile enum mmdvm_comm_t mmdvm_comm=COMM_IDLE;	//MMDVM comm status
 
 //ADC stuff
@@ -512,8 +512,11 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		config_ic(trx, cc1200_tx_settings);
 	}
 
+	//frequency correction
 	trx_writereg(trx, 0x2F0A, (uint16_t)trx_data.fcorr>>8);
 	trx_writereg(trx, 0x2F0B, (uint16_t)trx_data.fcorr&0xFF);
+	//disable address autoincrement in burst mode (default - enabled)
+	trx_writereg(trx, 0x2F06, 0);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -534,7 +537,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	//48kHz baseband sampler timer
 	else if(tim==TIM7)
 	{
-		bsb_pend=1;
+		bsb_tx_pend=1;
 	}
 }
 
@@ -554,16 +557,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		}
 
 		//handle overflow
-		if(rx_bc<sizeof(rxb))
+		if(rx_bc<sizeof(rxb)) //all normal - proceed
 		{
 			rx_bc++;
-			HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxb[rx_bc], 1); //all normal - proceed
-			//provide timeout timer
+			HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxb[rx_bc], 1);
+			//reset timeout timer
 			TIM6->CNT=0;
 			FIX_TIMER_TRIGGER(&htim6);
 			HAL_TIM_Base_Start_IT(&htim6);
 		}
-		else
+		else //overflow
 		{
 			mmdvm_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
 		}
@@ -731,7 +734,7 @@ int main(void)
 			  trx_data[CHIP_TX].frequency=tx_freq;
 			  config_rf(CHIP_RX, trx_data[CHIP_RX]);
 			  config_rf(CHIP_TX, trx_data[CHIP_TX]);
-			  alc_set=2500; //0 - no output, 3000 - about 47.8dBm (60W). I'm not sure if 0x04 sets power output
+			  alc_set=2475; //0 - no output, 3000 - about 47.8dBm (60W). I'm not sure if 0x04 sets power output
 			  //ACK it
 			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
 			  HAL_UART_Transmit_IT(&huart1, ack, 4);
@@ -771,8 +774,9 @@ int main(void)
 				  tx_state=TX_ACTIVE;
 				  set_rf_pwr_setpoint(alc_set);
 				  //initiate baseband SPI transfer to the transmitter
-				  ; //CS low
-				  ; //send 3-byte header
+				  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
+				  set_CS(CHIP_TX, 0); //CS low
+				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 3-byte header
 				  TIM7->CNT=0;
 				  //FIX_TIMER_TRIGGER(&htim7);
 				  HAL_TIM_Base_Start_IT(&htim7); //48kHz baseband sample timer
@@ -790,13 +794,15 @@ int main(void)
 		  mmdvm_comm=COMM_IDLE;
 	  }
 
-	  if(bsb_pend==1)
+	  if(bsb_tx_pend==1)
 	  {
 		  m17_samples++;
 
 		  if(m17_samples==10)
 		  {
+			  int8_t sample=0;
 			  ; //take another symbol from the buffer
+			  HAL_SPI_Transmit(&hspi1, (uint8_t*)&sample, 1, 2); //send baseband sample
 
 			  m17_samples=0;
 			  m17_symbols--;
@@ -807,14 +813,14 @@ int main(void)
 		  {
 			  set_rf_pwr_setpoint(0);
 			  HAL_TIM_Base_Stop_IT(&htim7); //48kHz baseband sample timer
-			  ; //CS high
+			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
 			  m17_buf_idx_wr=0;
 			  set_TP(TP2, 0); //debug
 			  //dbg_print("TX stop\n");
 		  }
 
-		  bsb_pend=0;
+		  bsb_tx_pend=0;
 	  }
     /* USER CODE END WHILE */
 
