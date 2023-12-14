@@ -34,6 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define M17_BUFLEN		12						//M17 buffer depth in frames
 /* USER CODE END PD */
@@ -121,7 +122,8 @@ uint8_t m17_buf[M17_BUFLEN][48]={0};				//M17 frame buffer
 uint8_t m17_buf_idx_wr=0;							//current frame buffer index (for writing)
 uint8_t m17_buf_idx_rd=0;							//current frame buffer index (for reading)
 uint32_t m17_symbols=0;								//how many symbols (frames*192) have been received so far
-uint32_t m17_samples=0;								//capacity for over 24 hours of transmitting
+uint32_t m17_sym_ctr=0;								//consumed symbols counter
+uint8_t m17_samples=0;								//modulo 10 counter for baseband sampling
 enum tx_state_t tx_state=TX_IDLE;					//transmitter state
 volatile uint8_t bsb_tx_pend=0;						//do we need to transmit another baseband sample?
 volatile enum mmdvm_comm_t mmdvm_comm=COMM_IDLE;	//MMDVM comm status
@@ -624,7 +626,7 @@ int main(void)
   HAL_Delay(100);
   trx_writecmd(CHIP_RX, STR_SRES);
   trx_writecmd(CHIP_TX, STR_SRES);
-  dbg_print("Hello world, this is your rru-rf board\n");
+  dbg_print(IDENT_STR); dbg_print("\n");
 
   HAL_Delay(100);
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
@@ -635,12 +637,10 @@ int main(void)
   trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-12; //shared clock source
   trx_data[CHIP_TX].pwr=63; //3 to 63
 
-  dbg_print("Starting TRX config...\n");
-
+  dbg_print("Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
   config_rf(CHIP_TX, trx_data[CHIP_TX]);
-
-  dbg_print("Done\n");
+  dbg_print(" done\n");
 
   HAL_Delay(50);
   trx_writecmd(CHIP_RX, STR_SRX);
@@ -716,7 +716,7 @@ int main(void)
 		  {
 			  //reply with RRU ident string
 			  uint8_t ident[70];
-			  sprintf((char*)&ident[4], "RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP");
+			  sprintf((char*)&ident[4], IDENT_STR);
 			  ident[0]=0xE0; //header
 			  ident[2]=0x00; //a reply to "Get Version" command
 			  ident[3]=0x01; //protocol version
@@ -780,7 +780,7 @@ int main(void)
 				  TIM7->CNT=0;
 				  //FIX_TIMER_TRIGGER(&htim7);
 				  HAL_TIM_Base_Start_IT(&htim7); //48kHz baseband sample timer
-				  set_TP(TP2, 1); //debug
+				  //set_TP(TP2, 1); //debug
 				  //dbg_print("TX start\n");
 			  }
 		  }
@@ -796,27 +796,54 @@ int main(void)
 
 	  if(bsb_tx_pend==1)
 	  {
+		  static int8_t bsb_sample=0;
 		  m17_samples++;
 
 		  if(m17_samples==10)
 		  {
-			  int8_t sample=0;
-			  ; //take another symbol from the buffer
-			  HAL_SPI_Transmit(&hspi1, (uint8_t*)&sample, 1, 2); //send baseband sample
+			  uint8_t dibit=0;
+			  //take another dibit from the buffer
+			  dibit=(m17_buf[m17_buf_idx_rd][m17_sym_ctr/4]>>(6-(m17_sym_ctr%4)*2)) & 0b11;
+			  switch(dibit)
+			  {
+			  	  case 0b00:
+			  		bsb_sample=+1;
+			  	  break;
+
+			  	  case 0b01:
+			  		bsb_sample=+3;
+			  	  break;
+
+			  	  case 0b10:
+			  		bsb_sample=-1;
+			  	  break;
+
+			  	  case 0b11:
+			  		bsb_sample=-3;
+			  	  break;
+			  }
+			  bsb_sample*=20;
 
 			  m17_samples=0;
-			  m17_symbols--;
+			  m17_sym_ctr++;
+			  m17_buf_idx_rd=(m17_sym_ctr/192)%M17_BUFLEN;
 		  }
 
+		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample
+
 		  //nothing else to transmit
-		  if(m17_symbols==0)
+		  if(m17_sym_ctr==m17_symbols)
 		  {
-			  set_rf_pwr_setpoint(0);
 			  HAL_TIM_Base_Stop_IT(&htim7); //48kHz baseband sample timer
+			  set_rf_pwr_setpoint(0);
 			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
 			  m17_buf_idx_wr=0;
-			  set_TP(TP2, 0); //debug
+			  m17_buf_idx_rd=0;
+			  m17_samples=0;
+			  m17_symbols=0;
+			  m17_sym_ctr=0;
+			  //set_TP(TP2, 0); //debug
 			  //dbg_print("TX stop\n");
 		  }
 
