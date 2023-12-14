@@ -25,6 +25,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include "m17_rrc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +37,8 @@
 /* USER CODE BEGIN PD */
 #define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
+#define M17_SPS			5						//samples per symbol
+#define M17_FLT_LEN		FLT_LEN_5
 #define M17_BUFLEN		12						//M17 buffer depth in frames
 /* USER CODE END PD */
 
@@ -123,10 +126,11 @@ uint8_t m17_buf_idx_wr=0;							//current frame buffer index (for writing)
 uint8_t m17_buf_idx_rd=0;							//current frame buffer index (for reading)
 uint32_t m17_symbols=0;								//how many symbols (frames*192) have been received so far
 uint32_t m17_sym_ctr=0;								//consumed symbols counter
-uint8_t m17_samples=0;								//modulo 10 counter for baseband sampling
+uint8_t m17_samples=0;								//modulo M17_SPS counter for baseband sampling
 enum tx_state_t tx_state=TX_IDLE;					//transmitter state
 volatile uint8_t bsb_tx_pend=0;						//do we need to transmit another baseband sample?
 volatile enum mmdvm_comm_t mmdvm_comm=COMM_IDLE;	//MMDVM comm status
+float m17_bsb_buff[M17_FLT_LEN]={0};					//delay line for the baseband filter
 
 //ADC stuff
 uint32_t adc_vals[3]={0};						//raw values read from ADC channels 0, 1, and 2
@@ -192,6 +196,12 @@ void set_rf_pwr_setpoint(uint16_t pwr)
 {
 	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFF:pwr);
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+}
+
+void set_dac_ch2(uint16_t val)
+{
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, val>0xFFF?0xFFF:val);
+	HAL_DAC_Start(&hdac, DAC_CHANNEL_2);
 }
 
 void get_rf_pwr_dbm(float* pwr_fwd, float* pwr_ref)
@@ -525,8 +535,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	TIM_TypeDef* tim = htim->Instance;
 
+	//baseband sampler timer
+	if(tim==TIM7)
+	{
+		bsb_tx_pend=1;
+	}
+
 	//USART1 timeout timer
-	if(tim==TIM6)
+	else if(tim==TIM6)
 	{
 		HAL_TIM_Base_Stop_IT(&htim6);
 
@@ -534,12 +550,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		{
 			mmdvm_comm=COMM_TOT; //set the TOT flag
 		}
-	}
-
-	//48kHz baseband sampler timer
-	else if(tim==TIM7)
-	{
-		bsb_tx_pend=1;
 	}
 }
 
@@ -617,6 +627,7 @@ int main(void)
 	SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));  /* set CP10 and CP11 Full Access */
   #endif
   set_rf_pwr_setpoint(0);
+  set_dac_ch2(0); //can be used for debugging
   rf_pa_en(0);
   set_CS(CHIP_RX, 1);
   set_CS(CHIP_TX, 1);
@@ -634,7 +645,7 @@ int main(void)
 
   trx_data[CHIP_RX].frequency=435000000; //default
   trx_data[CHIP_TX].frequency=435000000;
-  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-12; //shared clock source
+  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-9; //shared clock source, thus the same corr
   trx_data[CHIP_TX].pwr=63; //3 to 63
 
   dbg_print("Starting TRX config...");
@@ -734,7 +745,8 @@ int main(void)
 			  trx_data[CHIP_TX].frequency=tx_freq;
 			  config_rf(CHIP_RX, trx_data[CHIP_RX]);
 			  config_rf(CHIP_TX, trx_data[CHIP_TX]);
-			  alc_set=2475; //0 - no output, 3000 - about 47.8dBm (60W). I'm not sure if 0x04 sets power output
+			  alc_set=2000; //0 - no output, 3000 - about 47.8dBm (60W)
+			  //TODO: I'm not sure if 0x04 command sets power output
 			  //ACK it
 			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
 			  HAL_UART_Transmit_IT(&huart1, ack, 4);
@@ -779,7 +791,7 @@ int main(void)
 				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 3-byte header
 				  TIM7->CNT=0;
 				  //FIX_TIMER_TRIGGER(&htim7);
-				  HAL_TIM_Base_Start_IT(&htim7); //48kHz baseband sample timer
+				  HAL_TIM_Base_Start_IT(&htim7); //baseband sample timer
 				  //set_TP(TP2, 1); //debug
 				  //dbg_print("TX start\n");
 			  }
@@ -796,45 +808,69 @@ int main(void)
 
 	  if(bsb_tx_pend==1)
 	  {
-		  static int8_t bsb_sample=0;
+		  set_TP(TP2, 1); //debug
 		  m17_samples++;
 
-		  if(m17_samples==10)
+		  //push buffer
+		  for(uint8_t i=M17_FLT_LEN-1; i>0; i--)
+		  {
+			  m17_bsb_buff[i]=m17_bsb_buff[i-1];
+		  }
+
+		  //fetch next sample
+		  if(m17_samples==M17_SPS)
 		  {
 			  uint8_t dibit=0;
 			  //take another dibit from the buffer
 			  dibit=(m17_buf[m17_buf_idx_rd][m17_sym_ctr/4]>>(6-(m17_sym_ctr%4)*2)) & 0b11;
+
+			  //map to a symbol and push to buffer
 			  switch(dibit)
 			  {
 			  	  case 0b00:
-			  		bsb_sample=+1;
+			  		//bsb_sample=+1;
+			  		m17_bsb_buff[0]=+1.0f;
 			  	  break;
 
 			  	  case 0b01:
-			  		bsb_sample=+3;
+			  		//bsb_sample=+3;
+			  		m17_bsb_buff[0]=+3.0f;
 			  	  break;
 
 			  	  case 0b10:
-			  		bsb_sample=-1;
+			  		//bsb_sample=-1;
+			  		m17_bsb_buff[0]=-1.0f;
 			  	  break;
 
 			  	  case 0b11:
-			  		bsb_sample=-3;
+			  		//bsb_sample=-3;
+			  		m17_bsb_buff[0]=-3.0f;
 			  	  break;
 			  }
-			  bsb_sample*=20;
 
 			  m17_samples=0;
 			  m17_sym_ctr++;
 			  m17_buf_idx_rd=(m17_sym_ctr/192)%M17_BUFLEN;
 		  }
+		  else
+		  {
+			  m17_bsb_buff[0]=0.0f;
+		  }
 
+		  //calculate next baseband sample
+		  float f_bsb_sample=0.0f;
+		  for(uint8_t i=0; i<M17_FLT_LEN; i++)
+		  	  f_bsb_sample+=rrc_taps_5[i]*m17_bsb_buff[i];
+
+		  //scaling factor required to get +2.4k deviation for +3 symbol
+		  int8_t bsb_sample=roundf(f_bsb_sample*23.1f);
+		  //set_dac_ch2(bsb_sample*30+2048); //check if we don't overflow int8_t
 		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample
 
 		  //nothing else to transmit
 		  if(m17_sym_ctr==m17_symbols)
 		  {
-			  HAL_TIM_Base_Stop_IT(&htim7); //48kHz baseband sample timer
+			  HAL_TIM_Base_Stop_IT(&htim7); //baseband sample timer
 			  set_rf_pwr_setpoint(0);
 			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
@@ -847,6 +883,7 @@ int main(void)
 			  //dbg_print("TX stop\n");
 		  }
 
+		  set_TP(TP2, 0); //debug
 		  bsb_tx_pend=0;
 	  }
     /* USER CODE END WHILE */
@@ -1114,7 +1151,7 @@ static void MX_TIM7_Init(void)
   htim7.Instance = TIM7;
   htim7.Init.Prescaler = 1-1;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 1750-1;
+  htim7.Init.Period = 3500-1;
   htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
