@@ -801,7 +801,6 @@ int main(void)
 		  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
 		  {
 			  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
-			  //dbg_print("%02X %02X\n", rxb[4], rxb[5]);
 			  memcpy((uint8_t*)&m17_buf[m17_buf_idx_wr][0], (uint8_t*)&rxb[4], 48);
 			  m17_symbols+=192;
 			  m17_buf_idx_wr++;
@@ -851,7 +850,7 @@ int main(void)
 		  {
 			  uint8_t dibit=0;
 			  //take another dibit from the buffer
-			  dibit=(m17_buf[m17_buf_idx_rd][m17_sym_ctr/4]>>(6-(m17_sym_ctr%4)*2)) & 0b11;
+			  dibit=(m17_buf[m17_buf_idx_rd][(m17_sym_ctr/4)%48]>>(6-(m17_sym_ctr%4)*2)) & 0b11;
 
 			  //map to a symbol and push to buffer
 			  m17_bsb_buff[0]=m17_map_symbol(dibit);
