@@ -122,9 +122,9 @@ uint16_t alc_set=0;									//automatic level control setting (nonlinear)
 volatile uint8_t rxb[100]={0};						//rx buffer for MMDVM data
 volatile uint8_t rx_bc=0;							//UART1 rx byte counter
 uint8_t m17_buf[M17_BUFLEN][48]={0};				//M17 frame buffer
-uint8_t m17_buf_idx_wr=0;							//current frame buffer index (for writing)
+uint8_t m17_buf_idx_wr=1;							//current frame buffer index (for writing)
 uint8_t m17_buf_idx_rd=0;							//current frame buffer index (for reading)
-uint32_t m17_symbols=0;								//how many symbols (frames*192) have been received so far
+uint32_t m17_symbols=192;							//how many symbols (frames*192) have been received so far (starts at 192)
 uint32_t m17_sym_ctr=0;								//consumed symbols counter
 uint8_t m17_samples=0;								//modulo M17_SPS counter for baseband sampling
 enum tx_state_t tx_state=TX_IDLE;					//transmitter state
@@ -807,12 +807,15 @@ int main(void)
 			  m17_buf_idx_wr%=M17_BUFLEN;
 			  //start transmitting only after receiving some frames
 			  //to avoid possible buffer underflows
-			  if(tx_state==TX_IDLE && m17_buf_idx_wr>3)
+			  if(tx_state==TX_IDLE && m17_buf_idx_wr>2)
 			  {
 				  tx_state=TX_ACTIVE;
 				  trx_data[CHIP_TX].pwr=63;
 				  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 				  set_rf_pwr_setpoint(alc_set);
+				  HAL_Delay(2);
+				  //fill the preamble
+				  memset((uint8_t*)&m17_buf[0][0], 0b01110111, 48);
 				  //initiate baseband SPI transfer to the transmitter
 				  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
 				  set_CS(CHIP_TX, 0); //CS low
@@ -821,7 +824,7 @@ int main(void)
 				  //FIX_TIMER_TRIGGER(&htim7);
 				  HAL_TIM_Base_Start_IT(&htim7); //baseband sample timer
 				  //set_TP(TP2, 1); //debug
-				  //dbg_print("TX start\n");
+				  //dbg_print("TX -> start\n");
 			  }
 		  }
 	  }
@@ -883,13 +886,13 @@ int main(void)
 			  set_rf_pwr_setpoint(0);
 			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
-			  m17_buf_idx_wr=0;
+			  m17_buf_idx_wr=1;
 			  m17_buf_idx_rd=0;
 			  m17_samples=0;
-			  m17_symbols=0;
+			  m17_symbols=192;
 			  m17_sym_ctr=0;
 			  //set_TP(TP2, 0); //debug
-			  //dbg_print("TX stop\n");
+			  //dbg_print("TX -> end\n");
 		  }
 
 		  set_TP(TP2, 0); //debug
