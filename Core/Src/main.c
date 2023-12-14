@@ -130,7 +130,7 @@ uint8_t m17_samples=0;								//modulo M17_SPS counter for baseband sampling
 enum tx_state_t tx_state=TX_IDLE;					//transmitter state
 volatile uint8_t bsb_tx_pend=0;						//do we need to transmit another baseband sample?
 volatile enum mmdvm_comm_t mmdvm_comm=COMM_IDLE;	//MMDVM comm status
-float m17_bsb_buff[M17_FLT_LEN]={0};					//delay line for the baseband filter
+float m17_bsb_buff[M17_FLT_LEN]={0};				//delay line for the baseband filter
 
 //ADC stuff
 uint32_t adc_vals[3]={0};						//raw values read from ADC channels 0, 1, and 2
@@ -474,7 +474,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x26, 0x03,
 		0x00, 0x27, 0x00,
 		0x00, 0x28, 0x20,
-		0x00, 0x2B, 0x09, //power (0x03..0x3F)
+		0x00, 0x2B, 0x03, //power (0x03..0x3F)
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x22,
@@ -529,6 +529,30 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 	trx_writereg(trx, 0x2F0B, (uint16_t)trx_data.fcorr&0xFF);
 	//disable address autoincrement in burst mode (default - enabled)
 	trx_writereg(trx, 0x2F06, 0);
+}
+
+float m17_map_symbol(uint8_t dibit)
+{
+	switch(dibit)
+	{
+		case 0b00:
+			return +1.0f;
+		break;
+
+		case 0b01:
+			return +3.0f;
+		break;
+
+		case 0b10:
+			return -1.0f;
+		break;
+
+		case 0b11:
+			return -3.0f;
+		break;
+	}
+
+	return 0.0f;
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -641,12 +665,12 @@ int main(void)
 
   HAL_Delay(100);
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
-  dbg_print("Detected RF ICs:\nRX - %s\nTX - %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
+  dbg_print("Detected RF IC -> RX: %s\nDetected RF IC -> TX: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
 
   trx_data[CHIP_RX].frequency=435000000; //default
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-9; //shared clock source, thus the same corr
-  trx_data[CHIP_TX].pwr=63; //3 to 63
+  trx_data[CHIP_TX].pwr=3; //3 to 63
 
   dbg_print("Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
@@ -660,8 +684,10 @@ int main(void)
   HAL_Delay(50);
   trx_data[CHIP_RX].pll_locked = trx_readreg(CHIP_RX, 0x2F8D)%2; //FSCAL_CTRL
   trx_data[CHIP_TX].pll_locked = trx_readreg(CHIP_TX, 0x2F8D)%2;
-  trx_data[CHIP_RX].pll_locked ? dbg_print("RX PLL locked\n") : dbg_print("RX PLL unlocked\n");
-  trx_data[CHIP_TX].pll_locked ? dbg_print("TX PLL locked\n") : dbg_print("TX PLL unlocked\n");
+  dbg_print("PLL -> RX");
+  trx_data[CHIP_RX].pll_locked ? dbg_print(" locked\n") : dbg_print(" unlocked\n");
+  dbg_print("PLL -> TX");
+  trx_data[CHIP_TX].pll_locked ? dbg_print(" locked\n") : dbg_print(" unlocked\n");
 
   if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
   {
@@ -739,7 +765,7 @@ int main(void)
 			  uint32_t rx_freq, tx_freq;
 			  memcpy((uint8_t*)&rx_freq, (uint8_t*)&rxb[4], sizeof(uint32_t));
 			  memcpy((uint8_t*)&tx_freq, (uint8_t*)&rxb[8], sizeof(uint32_t));
-			  dbg_print("MMDVM CMD RX: %ld, TX: %ld\n", rx_freq, tx_freq);
+			  dbg_print("MMDVM CMD -> RX: %ldHz\nMMDVM CMD -> TX: %ldHz\n", rx_freq, tx_freq);
 			  //reconfig TRXs
 			  trx_data[CHIP_RX].frequency=rx_freq;
 			  trx_data[CHIP_TX].frequency=tx_freq;
@@ -775,6 +801,7 @@ int main(void)
 		  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
 		  {
 			  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
+			  //dbg_print("%02X %02X\n", rxb[4], rxb[5]);
 			  memcpy((uint8_t*)&m17_buf[m17_buf_idx_wr][0], (uint8_t*)&rxb[4], 48);
 			  m17_symbols+=192;
 			  m17_buf_idx_wr++;
@@ -784,6 +811,8 @@ int main(void)
 			  if(tx_state==TX_IDLE && m17_buf_idx_wr>3)
 			  {
 				  tx_state=TX_ACTIVE;
+				  trx_data[CHIP_TX].pwr=63;
+				  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 				  set_rf_pwr_setpoint(alc_set);
 				  //initiate baseband SPI transfer to the transmitter
 				  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
@@ -825,28 +854,7 @@ int main(void)
 			  dibit=(m17_buf[m17_buf_idx_rd][m17_sym_ctr/4]>>(6-(m17_sym_ctr%4)*2)) & 0b11;
 
 			  //map to a symbol and push to buffer
-			  switch(dibit)
-			  {
-			  	  case 0b00:
-			  		//bsb_sample=+1;
-			  		m17_bsb_buff[0]=+1.0f;
-			  	  break;
-
-			  	  case 0b01:
-			  		//bsb_sample=+3;
-			  		m17_bsb_buff[0]=+3.0f;
-			  	  break;
-
-			  	  case 0b10:
-			  		//bsb_sample=-1;
-			  		m17_bsb_buff[0]=-1.0f;
-			  	  break;
-
-			  	  case 0b11:
-			  		//bsb_sample=-3;
-			  		m17_bsb_buff[0]=-3.0f;
-			  	  break;
-			  }
+			  m17_bsb_buff[0]=m17_map_symbol(dibit);
 
 			  m17_samples=0;
 			  m17_sym_ctr++;
@@ -864,13 +872,15 @@ int main(void)
 
 		  //scaling factor required to get +2.4k deviation for +3 symbol
 		  int8_t bsb_sample=roundf(f_bsb_sample*23.1f);
-		  //set_dac_ch2(bsb_sample*30+2048); //check if we don't overflow int8_t
+		  set_dac_ch2(bsb_sample*32+2048); //check if we don't overflow int8_t
 		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample
 
 		  //nothing else to transmit
 		  if(m17_sym_ctr==m17_symbols)
 		  {
 			  HAL_TIM_Base_Stop_IT(&htim7); //baseband sample timer
+			  trx_data[CHIP_TX].pwr=3;
+			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 			  set_rf_pwr_setpoint(0);
 			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
