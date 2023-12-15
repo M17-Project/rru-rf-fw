@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "m17_rrc.h"
+#include "term.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -164,30 +165,44 @@ static void MX_TIM7_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void dbg_print(const char* fmt, ...)
+void dbg_print(const char* color_code, const char* fmt, ...)
 {
-	char str[64];
+	char str[100];
 	va_list ap;
 
 	va_start(ap, fmt);
 	vsprintf(str, fmt, ap);
 	va_end(ap);
 
-	HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
+	if(color_code!=NULL)
+	{
+		HAL_UART_Transmit(&huart3, (uint8_t*)color_code, strlen(color_code), 10);
+		HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
+		HAL_UART_Transmit(&huart3, (uint8_t*)TERM_DEFAULT, strlen(TERM_DEFAULT), 10);
+	}
+	else
+	{
+		HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
+	}
 }
 
-//get temperature based on LMT87's output voltage
-float get_temp(void)
+//get RF power in dBm
+//and temperature in degs C, based on LMT87's output voltage
+void get_adc_vals(float* pwr_fwd, float* pwr_ref, float* temp)
 {
 	uint32_t values[3];
 	HAL_ADC_Start_DMA(&hadc1, values, 3);
 	HAL_ADC_PollForConversion(&hadc1, 20);
 
 	float u=values[2]/4096.0f*VDDA;
-	//dbg_print("[DBG] %1.4f\n", u);
 	HAL_Delay(1); //TODO: why is this delay needed to make this func work?
 
-	return (-13.582f+sqrtf(184.470724f+0.01732f*(2.2308f-u)*1000.0f))/0.00866f + 30.0f;
+	//dbg_print(TERM_YELLOW, "[DBG] %ld, %ld, %ld\n", values[0], values[1], values[2]);
+	//dbg_print(TERM_YELLOW, "[DBG] %1.4f\n", u);
+
+	*pwr_fwd=cal_a*(values[0]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr; //take coupling and attenuation into account
+	*pwr_ref=cal_a*(values[1]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr;
+	*temp=(-13.582f+sqrtf(184.470724f+0.01732f*(2.2308f-u)*1000.0f))/0.00866f + 30.0f;
 }
 
 //set rf power output setpoint
@@ -202,18 +217,6 @@ void set_dac_ch2(uint16_t val)
 {
 	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, val>0xFFF?0xFFF:val);
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_2);
-}
-
-void get_rf_pwr_dbm(float* pwr_fwd, float* pwr_ref)
-{
-	uint32_t values[3];
-	HAL_ADC_Start_DMA(&hadc1, values, 3);
-	HAL_ADC_PollForConversion(&hadc1, 20);
-
-	//dbg_print("[DBG] %ld, %ld\n", values[0], values[1]);
-
-	*pwr_fwd=cal_a*(values[0]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr; //take coupling and attenuation into account
-	*pwr_ref=cal_a*(values[1]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr;
 }
 
 //calculate SWR based on fwd and ref power
@@ -376,7 +379,7 @@ void config_ic(enum trx_t trx, uint8_t* settings)
 {
 	for(uint8_t i=0; i<51; i++)
 	{
-		//dbg_print("[%03d] 0x%02X 0x%02X 0x%02X\n",
+		//dbg_print(TERM_YELLOW, "[%03d] 0x%02X 0x%02X 0x%02X\n",
 		//		i*3, settings[i*3], settings[i*3+1], settings[i*3+2]);
 		set_CS(trx, 0);
 		if(settings[i*3])
@@ -397,16 +400,16 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x01, 0x08,
 		0x00, 0x03, 0x09,
 		0x00, 0x08, 0x1F,
-		0x00, 0x0A, 0x9F, //RX bw
-		0x00, 0x0B, 0x00,
+		0x00, 0x0A, 0x9F, //deviation - about 3kHz full scale
+		0x00, 0x0B, 0x00, //deviation
 		0x00, 0x0C, 0x5D,
 		0x00, 0x0D, 0x00,
 		0x00, 0x0E, 0x8A,
 		0x00, 0x0F, 0xCB,
-		0x00, 0x10, 0xAC,
+		0x00, 0x10, 0xAC, //RX filter BW - 9.5kHz
 		0x00, 0x11, 0x00,
 		0x00, 0x12, 0x45,
-		0x00, 0x13, 0x3F, //symbol rate 2
+		0x00, 0x13, 0x3F, //symbol rate 2 - 1.2k sym/s
 		0x00, 0x14, 0x75, //symbol rate 1
 		0x00, 0x15, 0x10, //symbol rate 0
 		0x00, 0x16, 0x37,
@@ -419,15 +422,15 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x26, 0x03,
 		0x00, 0x27, 0x00,
 		0x00, 0x28, 0x20,
-		0x00, 0x2B, 0x03,
+		0x00, 0x2B, 0x03, //output power - 0x03..0x3F (doesn't matter for RX)
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x02, //AFC, 0x22 - on, 0x02 - off
-		0x2F, 0x04, 0x0C, //oscillator frequency is 40 MHz
-		0x2F, 0x05, 0x0D,
-		0x2F, 0x0C, 0x57, //freq round((float)435000000/5000000*(1<<16))
-		0x2F, 0x0D, 0x00, //freq
-		0x2F, 0x0E, 0x00, //freq
+		0x2F, 0x04, 0x0C, //external oscillator's frequency is 40 MHz
+		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
+		0x2F, 0x0C, 0x57, //frequency - round((float)435000000/5000000*(1<<16))=0x570000
+		0x2F, 0x0D, 0x00, //frequency
+		0x2F, 0x0E, 0x00, //frequency
 		0x2F, 0x10, 0xEE,
 		0x2F, 0x11, 0x10,
 		0x2F, 0x12, 0x07,
@@ -444,7 +447,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x2F, 0x27, 0xB5,
 		0x2F, 0x32, 0x0E,
 		0x2F, 0x36, 0x03,
-		0x2F, 0x91, 0x08,
+		0x2F, 0x91, 0x08
 	};
 
 	static uint8_t cc1200_tx_settings[51*3] =
@@ -452,16 +455,16 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x01, 0x08,
 		0x00, 0x03, 0x09,
 		0x00, 0x08, 0x1F,
-		0x00, 0x0A, 0x06, //deviation
-		0x00, 0x0B, 0x01, //deviation, LSB - exponent
+		0x00, 0x0A, 0x06, //deviation - 5kHz full scale
+		0x00, 0x0B, 0x01, //deviation
 		0x00, 0x0C, 0x5D,
 		0x00, 0x0D, 0x00,
 		0x00, 0x0E, 0x8A,
 		0x00, 0x0F, 0xCB,
-		0x00, 0x10, 0xAC,
+		0x00, 0x10, 0xAC, //RX filter BW - 9.5kHz (doesn't matter for TX)
 		0x00, 0x11, 0x00,
 		0x00, 0x12, 0x45,
-		0x00, 0x13, 0x83, //symbol rate 2 - 24kSa/s
+		0x00, 0x13, 0x83, //symbol rate 2 - 24k symb/s
 		0x00, 0x14, 0xA9, //symbol rate 1
 		0x00, 0x15, 0x2A, //symbol rate 0
 		0x00, 0x16, 0x37,
@@ -474,15 +477,15 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x26, 0x03,
 		0x00, 0x27, 0x00,
 		0x00, 0x28, 0x20,
-		0x00, 0x2B, 0x03, //power (0x03..0x3F)
+		0x00, 0x2B, 0x03, //output power - 0x03..0x3F
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x22,
-		0x2F, 0x04, 0x0C, //oscillator frequency is 40 MHz
+		0x2F, 0x04, 0x0C, //external oscillator's frequency is 40 MHz
 		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
-		0x2F, 0x0C, 0x57, //freq 435M = 0x570000
-		0x2F, 0x0D, 0x00, //freq
-		0x2F, 0x0E, 0x00, //freq
+		0x2F, 0x0C, 0x57, //frequency - round((float)435000000/5000000*(1<<16))=0x570000
+		0x2F, 0x0D, 0x00, //frequency
+		0x2F, 0x0E, 0x00, //frequency
 		0x2F, 0x10, 0xEE,
 		0x2F, 0x11, 0x10,
 		0x2F, 0x12, 0x07,
@@ -499,11 +502,11 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x2F, 0x27, 0xB5,
 		0x2F, 0x32, 0x0E,
 		0x2F, 0x36, 0x03,
-		0x2F, 0x91, 0x08,
+		0x2F, 0x91, 0x08
 	};
 
 	freq_word=roundf((float)trx_data.frequency/5000000.0*((uint32_t)1<<16));
-	//dbg_print("freq_word=%04lX\n", freq_word);
+	//dbg_print(0, "freq_word=%04lX\n", freq_word);
 
 	if(trx==CHIP_RX)
 	{
@@ -661,21 +664,22 @@ int main(void)
   HAL_Delay(100);
   trx_writecmd(CHIP_RX, STR_SRES);
   trx_writecmd(CHIP_TX, STR_SRES);
-  dbg_print(IDENT_STR); dbg_print("\n");
+  dbg_print(0, TERM_CLR); //clear console and print out ident string
+  dbg_print(TERM_GREEN, IDENT_STR); dbg_print(0,  "\n");
 
   HAL_Delay(100);
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
-  dbg_print("Detected RF IC -> RX: %s\nDetected RF IC -> TX: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
+  dbg_print(0, "RX IC: %s\nTX IC: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
 
   trx_data[CHIP_RX].frequency=435000000; //default
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-9; //shared clock source, thus the same corr
   trx_data[CHIP_TX].pwr=3; //3 to 63
 
-  dbg_print("Starting TRX config...");
+  dbg_print(0, "Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
   config_rf(CHIP_TX, trx_data[CHIP_TX]);
-  dbg_print(" done\n");
+  dbg_print(TERM_GREEN, " done\n");
 
   HAL_Delay(50);
   trx_writecmd(CHIP_RX, STR_SRX);
@@ -684,19 +688,20 @@ int main(void)
   HAL_Delay(50);
   trx_data[CHIP_RX].pll_locked = trx_readreg(CHIP_RX, 0x2F8D)%2; //FSCAL_CTRL
   trx_data[CHIP_TX].pll_locked = trx_readreg(CHIP_TX, 0x2F8D)%2;
-  dbg_print("PLL -> RX");
-  trx_data[CHIP_RX].pll_locked ? dbg_print(" locked\n") : dbg_print(" unlocked\n");
-  dbg_print("PLL -> TX");
-  trx_data[CHIP_TX].pll_locked ? dbg_print(" locked\n") : dbg_print(" unlocked\n");
+  dbg_print(0, "RX PLL");
+  trx_data[CHIP_RX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+  dbg_print(0, "TX PLL");
+  trx_data[CHIP_TX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
 
   if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
   {
-	  dbg_print("ERROR: At least one PLL didn't lock\nHalting\n");
+	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock\nHalting\n");
 	  while(1);
   }
 
-  //dbg_print("TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
+  //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
   rf_pa_en(1);
+  dbg_print(TERM_YELLOW, "[DBG] RF_PA enabled\n");
 
   //enable MMDVM comms over UART1
   //memset((uint8_t*)rxb, 0, sizeof(rxb));
@@ -708,31 +713,30 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while(0) //PA test
   {
-	  float fwd=0.0, ref=0.0, swr=0.0, temp=0.0;
+	  float fwd=0.0, ref=0.0, temp=0.0, swr=0.0;
 
 	  set_rf_pwr_setpoint(0);
 	  HAL_Delay(1000);
 	  //get_rf_pwr_dbm(&fwd, &ref);
 	  //swr=calc_swr(fwd, ref);
-	  //dbg_print("FWD=%2.1fdBm REF=%2.1fdBm, SWR=%-.--f\n", fwd, ref);
+	  //dbg_print(0, "FWD=%2.1fdBm REF=%2.1fdBm, SWR=%-.--f\n", fwd, ref);
 
 	  set_rf_pwr_setpoint(2500);
 	  HAL_Delay(5000);
-	  get_rf_pwr_dbm(&fwd, &ref);
+	  get_adc_vals(&fwd, &ref, &temp);
 	  swr=calc_swr(fwd, ref);
-	  temp=get_temp();
 	  if(fwd>=27.0)
-		  dbg_print("FWD=%2.1fdBm REF=%2.1fdBm SWR=%2.2f T=%3.1f\n", fwd, ref, swr, temp);
+		  dbg_print(0, "FWD=%2.1fdBm REF=%2.1fdBm SWR=%2.2f T=%3.1f\n", fwd, ref, swr, temp);
 	  else
-		  dbg_print("FWD=--.-dBm REF=--.-fdBm SWR=--.- T=%3.1f\n", temp);
+		  dbg_print(0, "FWD=--.-dBm REF=--.-fdBm SWR=--.- T=%3.1f\n", temp);
   }
 
   while(0) //temp test
   {
 	  float temp=0.0;
 
-	  temp=get_temp();
-	  dbg_print("T=%3.1f\n", temp);
+	  get_adc_vals(NULL, NULL, &temp);
+	  dbg_print(0, "T=%3.1f\n", temp);
 	  HAL_Delay(500);
   }
 
@@ -746,7 +750,7 @@ int main(void)
 		  mmdvm_comm=COMM_IDLE;
 		  set_TP(TP1, 0);
 
-		  //dbg_print("type 0x%02X\tlen %02d\n", rxb[2], rxb[1]);
+		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[2], rxb[1]);
 		  uint8_t cmd=rxb[2];
 
 		  if(cmd==0x00) //"Get Version"
@@ -760,19 +764,18 @@ int main(void)
 			  ident[1]=strlen((char*)&ident[4])+4; //total length
 			  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
 		  }
-		  else if(cmd==0x04) //"???" - set RX/TX frequencies etc.
+		  else if(cmd==0x04) //"???" - set RX/TX frequencies etc. TODO: I'm not sure if 0x04 command sets power output
 		  {
 			  uint32_t rx_freq, tx_freq;
 			  memcpy((uint8_t*)&rx_freq, (uint8_t*)&rxb[4], sizeof(uint32_t));
 			  memcpy((uint8_t*)&tx_freq, (uint8_t*)&rxb[8], sizeof(uint32_t));
-			  dbg_print("MMDVM CMD -> RX: %ldHz\nMMDVM CMD -> TX: %ldHz\n", rx_freq, tx_freq);
+			  dbg_print(0, "[MMDVM_CMD] RX %ld Hz\n[MMDVM_CMD] TX %ld Hz\n", rx_freq, tx_freq);
 			  //reconfig TRXs
 			  trx_data[CHIP_RX].frequency=rx_freq;
 			  trx_data[CHIP_TX].frequency=tx_freq;
 			  config_rf(CHIP_RX, trx_data[CHIP_RX]);
 			  config_rf(CHIP_TX, trx_data[CHIP_TX]);
 			  alc_set=2000; //0 - no output, 3000 - about 47.8dBm (60W)
-			  //TODO: I'm not sure if 0x04 command sets power output
 			  //ACK it
 			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
 			  HAL_UART_Transmit_IT(&huart1, ack, 4);
@@ -813,7 +816,7 @@ int main(void)
 				  trx_data[CHIP_TX].pwr=63;
 				  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 				  set_rf_pwr_setpoint(alc_set);
-				  HAL_Delay(2);
+				  dbg_print(0, "TX -> start\n");
 				  //fill the preamble
 				  memset((uint8_t*)&m17_buf[0][0], 0b01110111, 48);
 				  //initiate baseband SPI transfer to the transmitter
@@ -824,7 +827,6 @@ int main(void)
 				  //FIX_TIMER_TRIGGER(&htim7);
 				  HAL_TIM_Base_Start_IT(&htim7); //baseband sample timer
 				  //set_TP(TP2, 1); //debug
-				  //dbg_print("TX -> start\n");
 			  }
 		  }
 	  }
@@ -873,7 +875,7 @@ int main(void)
 		  	  f_bsb_sample+=rrc_taps_5[i]*m17_bsb_buff[i];
 
 		  //scaling factor required to get +2.4k deviation for +3 symbol
-		  int8_t bsb_sample=roundf(f_bsb_sample*23.1f);
+		  int8_t bsb_sample=roundf(f_bsb_sample*23.08f);
 		  set_dac_ch2(bsb_sample*32+2048); //check if we don't overflow int8_t
 		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample
 
@@ -892,7 +894,7 @@ int main(void)
 			  m17_symbols=192;
 			  m17_sym_ctr=0;
 			  //set_TP(TP2, 0); //debug
-			  //dbg_print("TX -> end\n");
+			  dbg_print(0, "TX -> end\n");
 		  }
 
 		  set_TP(TP2, 0); //debug
