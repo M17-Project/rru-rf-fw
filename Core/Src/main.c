@@ -118,6 +118,7 @@ enum mmdvm_comm_t
 
 //PA
 uint16_t alc_set=0;									//automatic level control setting (nonlinear)
+float tx_dbm=0.0f;									//RF power setpoint, dBm
 
 //MMDVM stuff
 volatile uint8_t rxb[100]={0};						//rx buffer for MMDVM data
@@ -184,6 +185,11 @@ void dbg_print(const char* color_code, const char* fmt, ...)
 	{
 		HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
 	}
+}
+
+uint16_t dbm_to_alc(float dbm)
+{
+	return roundf(45.7617815165741f*dbm+917.06823976946f);
 }
 
 //get RF power in dBm
@@ -671,7 +677,7 @@ int main(void)
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
   dbg_print(0, "RX IC: %s\nTX IC: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
 
-  trx_data[CHIP_RX].frequency=435000000; //default
+  trx_data[CHIP_RX].frequency=433475000; //default
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-9; //shared clock source, thus the same corr
   trx_data[CHIP_TX].pwr=3; //3 to 63
@@ -701,7 +707,7 @@ int main(void)
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
   rf_pa_en(1);
-  dbg_print(TERM_YELLOW, "[DBG] RF_PA enabled\n");
+  dbg_print(TERM_YELLOW, "[INFO] PA_EN asserted\n");
 
   //enable MMDVM comms over UART1
   //memset((uint8_t*)rxb, 0, sizeof(rxb));
@@ -740,7 +746,14 @@ int main(void)
 	  HAL_Delay(500);
   }
 
-  while(1) //MMDVM test
+  while(0) //RX test
+  {
+	  uint8_t val=trx_readreg(CHIP_RX, 0x2F7D);
+	  //HAL_UART_Transmit(&huart3, &val, 1, 10);
+	  set_dac_ch2((int8_t)val*31+2048);
+  }
+
+  while(1) //MMDVM TX test
   {
 	  if(mmdvm_comm==COMM_RDY) //if a valid MMDVM frame is detected
 	  {
@@ -775,7 +788,9 @@ int main(void)
 			  trx_data[CHIP_TX].frequency=tx_freq;
 			  config_rf(CHIP_RX, trx_data[CHIP_RX]);
 			  config_rf(CHIP_TX, trx_data[CHIP_TX]);
-			  alc_set=2000; //0 - no output, 3000 - about 47.8dBm (60W)
+			  tx_dbm=40;
+			  alc_set=dbm_to_alc(tx_dbm);
+			  dbg_print(TERM_YELLOW, "[INFO] ALC=%d (%2.1fdBm)\n",alc_set, tx_dbm);
 			  //ACK it
 			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
 			  HAL_UART_Transmit_IT(&huart1, ack, 4);
@@ -876,7 +891,7 @@ int main(void)
 
 		  //scaling factor required to get +2.4k deviation for +3 symbol
 		  int8_t bsb_sample=roundf(f_bsb_sample*23.08f);
-		  set_dac_ch2(bsb_sample*32+2048); //check if we don't overflow int8_t
+		  set_dac_ch2(bsb_sample*31+2048); //check if we don't overflow int8_t
 		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample
 
 		  //nothing else to transmit
