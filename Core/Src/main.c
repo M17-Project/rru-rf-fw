@@ -38,6 +38,7 @@
 /* USER CODE BEGIN PD */
 #define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
+#define CC1200_REG_NUM	51
 #define M17_SPS			5						//samples per symbol
 #define M17_FLT_LEN		FLT_LEN_5
 #define M17_BUFLEN		12						//M17 buffer depth in frames
@@ -383,7 +384,7 @@ void detect_ic(uint8_t* rx, uint8_t* tx)
 
 void config_ic(enum trx_t trx, uint8_t* settings)
 {
-	for(uint8_t i=0; i<51; i++)
+	for(uint8_t i=0; i<CC1200_REG_NUM; i++)
 	{
 		//dbg_print(TERM_YELLOW, "[%03d] 0x%02X 0x%02X 0x%02X\n",
 		//		i*3, settings[i*3], settings[i*3+1], settings[i*3+2]);
@@ -401,7 +402,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 {
 	uint32_t freq_word=0;
 
-	static uint8_t cc1200_rx_settings[51*3] =
+	static uint8_t cc1200_rx_settings[CC1200_REG_NUM*3] =
 	{
 		0x00, 0x01, 0x08,
 		0x00, 0x03, 0x09,
@@ -456,7 +457,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x2F, 0x91, 0x08
 	};
 
-	static uint8_t cc1200_tx_settings[51*3] =
+	static uint8_t cc1200_tx_settings[CC1200_REG_NUM*3] =
 	{
 		0x00, 0x01, 0x08,
 		0x00, 0x03, 0x09,
@@ -470,7 +471,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x10, 0xAC, //RX filter BW - 9.5kHz (doesn't matter for TX)
 		0x00, 0x11, 0x00,
 		0x00, 0x12, 0x45,
-		0x00, 0x13, 0x83, //symbol rate 2 - 24k symb/s
+		0x00, 0x13, 0x43, //symbol rate 2 - 1.5k symb/s
 		0x00, 0x14, 0xA9, //symbol rate 1
 		0x00, 0x15, 0x2A, //symbol rate 0
 		0x00, 0x16, 0x37,
@@ -685,6 +686,8 @@ int main(void)
   dbg_print(0, "Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
   config_rf(CHIP_TX, trx_data[CHIP_TX]);
+  trx_writereg(CHIP_TX, 0x0000, 30); //IOCFG3, GPIO3 - CFM_TX_DATA_CLK
+  trx_writereg(CHIP_RX, 0x0000, 29); //IOCFG3, GPIO3 - CLKEN_CFM
   dbg_print(TERM_GREEN, " done\n");
 
   HAL_Delay(50);
