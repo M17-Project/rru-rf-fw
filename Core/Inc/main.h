@@ -73,6 +73,9 @@ void Error_Handler(void);
 #define DBG_TX_GPIO_Port GPIOB
 #define DBG_RX_Pin GPIO_PIN_11
 #define DBG_RX_GPIO_Port GPIOB
+#define TX_TRIG_Pin GPIO_PIN_12
+#define TX_TRIG_GPIO_Port GPIOB
+#define TX_TRIG_EXTI_IRQn EXTI15_10_IRQn
 #define RX_nCS_Pin GPIO_PIN_6
 #define RX_nCS_GPIO_Port GPIOB
 #define TX_nCS_Pin GPIO_PIN_7

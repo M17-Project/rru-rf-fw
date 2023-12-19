@@ -36,6 +36,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define BODGEWIRE_TX							//TX CC1200's GPIO3 connected to PB12?
 #define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51
@@ -416,9 +417,9 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x10, 0xAC, //RX filter BW - 9.5kHz
 		0x00, 0x11, 0x00,
 		0x00, 0x12, 0x45,
-		0x00, 0x13, 0x3F, //symbol rate 2 - 1.2k sym/s
-		0x00, 0x14, 0x75, //symbol rate 1
-		0x00, 0x15, 0x10, //symbol rate 0
+		0x00, 0x13, 0x43, //symbol rate 2 - 1.5k sym/s
+		0x00, 0x14, 0xA9, //symbol rate 1
+		0x00, 0x15, 0x2A, //symbol rate 0
 		0x00, 0x16, 0x37,
 		0x00, 0x17, 0xEC,
 		0x00, 0x19, 0x11,
@@ -521,6 +522,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		cc1200_rx_settings[33*3-1]=(freq_word>>8)&0xFF;
 		cc1200_rx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_rx_settings);
+		trx_writereg(trx, 0x0000, 29);		//IOCFG3, GPIO3 - CLKEN_CFM
 	}
 	else if(trx==CHIP_TX)
 	{
@@ -532,6 +534,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		cc1200_tx_settings[33*3-1]=(freq_word>>8)&0xFF;
 		cc1200_tx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_tx_settings);
+		trx_writereg(trx, 0x0000, 30);		//IOCFG3, GPIO3 - CFM_TX_DATA_CLK
 	}
 
 	//frequency correction
@@ -569,6 +572,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	TIM_TypeDef* tim = htim->Instance;
 
+	#ifndef BODGEWIRE_TX
 	//baseband sampler timer
 	if(tim==TIM7)
 	{
@@ -576,7 +580,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	}
 
 	//USART1 timeout timer
-	else if(tim==TIM6)
+	else
+	#endif
+	if(tim==TIM6)
 	{
 		HAL_TIM_Base_Stop_IT(&htim6);
 
@@ -585,6 +591,21 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			mmdvm_comm=COMM_TOT; //set the TOT flag
 		}
 	}
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	#ifdef BODGEWIRE_TX
+	if(GPIO_Pin==TX_TRIG_Pin)
+	{
+		bsb_tx_pend=1;
+	}
+	//else
+	#endif
+	/*if(GPIO_Pin==RX_TRIG_Pin)
+	{
+		;
+	}*/
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -686,8 +707,6 @@ int main(void)
   dbg_print(0, "Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
   config_rf(CHIP_TX, trx_data[CHIP_TX]);
-  trx_writereg(CHIP_TX, 0x0000, 30); //IOCFG3, GPIO3 - CFM_TX_DATA_CLK
-  trx_writereg(CHIP_RX, 0x0000, 29); //IOCFG3, GPIO3 - CLKEN_CFM
   dbg_print(TERM_GREEN, " done\n");
 
   HAL_Delay(50);
@@ -841,9 +860,13 @@ int main(void)
 				  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
 				  set_CS(CHIP_TX, 0); //CS low
 				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 3-byte header
+				  #ifdef BODGEWIRE_TX
+				  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
+				  #else
 				  TIM7->CNT=0;
 				  //FIX_TIMER_TRIGGER(&htim7);
-				  HAL_TIM_Base_Start_IT(&htim7); //baseband sample timer
+				  HAL_TIM_Base_Start_IT(&htim7); //internal baseband sample timer
+				  #endif
 				  //set_TP(TP2, 1); //debug
 			  }
 		  }
@@ -900,7 +923,11 @@ int main(void)
 		  //nothing else to transmit
 		  if(m17_sym_ctr==m17_symbols)
 		  {
-			  HAL_TIM_Base_Stop_IT(&htim7); //baseband sample timer
+			  #ifdef BODGEWIRE_TX
+			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
+			  #else
+			  HAL_TIM_Base_Stop_IT(&htim7); //internal baseband sample timer
+			  #endif
 			  trx_data[CHIP_TX].pwr=3;
 			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 			  set_rf_pwr_setpoint(0);
@@ -1312,7 +1339,18 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : TX_TRIG_Pin */
+  GPIO_InitStruct.Pin = TX_TRIG_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(TX_TRIG_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
 /* USER CODE BEGIN MX_GPIO_Init_2 */
+  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //immediately disable it, as we don't need it right away
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
