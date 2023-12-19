@@ -882,8 +882,15 @@ int main(void)
 
 	  if(bsb_tx_pend==1)
 	  {
+		  static float f_bsb_sample=0.0f;
+
 		  set_TP(TP2, 1); //debug
 		  m17_samples++;
+
+		  //scaling factor required to get +2.4k deviation for +3 symbol
+		  int8_t bsb_sample=roundf(f_bsb_sample*23.08f);
+		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample ASAP
+		  //set_dac_ch2(bsb_sample*31+2048); //debug - check if we don't overflow int8_t
 
 		  //push buffer
 		  for(uint8_t i=M17_FLT_LEN-1; i>0; i--)
@@ -911,14 +918,9 @@ int main(void)
 		  }
 
 		  //calculate next baseband sample
-		  float f_bsb_sample=0.0f;
+		  f_bsb_sample=0.0f;
 		  for(uint8_t i=0; i<M17_FLT_LEN; i++)
 		  	  f_bsb_sample+=rrc_taps_5[i]*m17_bsb_buff[i];
-
-		  //scaling factor required to get +2.4k deviation for +3 symbol
-		  int8_t bsb_sample=roundf(f_bsb_sample*23.08f);
-		  set_dac_ch2(bsb_sample*31+2048); //check if we don't overflow int8_t
-		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample
 
 		  //nothing else to transmit
 		  if(m17_sym_ctr==m17_symbols)
