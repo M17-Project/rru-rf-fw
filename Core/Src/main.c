@@ -27,6 +27,7 @@
 #include <stdarg.h>
 #include "m17_rrc.h"
 #include "term.h"
+#include "interface_cmds.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,7 +37,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BODGEWIRE_TX							//TX CC1200's GPIO3 connected to PB12?
 #define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51
@@ -110,7 +110,7 @@ enum tx_state_t
 	TX_ACTIVE
 };
 
-enum mmdvm_comm_t
+enum interface_comm_t
 {
 	COMM_IDLE,
 	COMM_RDY,
@@ -119,25 +119,25 @@ enum mmdvm_comm_t
 };
 
 //PA
-uint16_t alc_set=0;									//automatic level control setting (nonlinear)
-float tx_dbm=0.0f;									//RF power setpoint, dBm
+uint16_t alc_set=0;											//automatic level control setting (nonlinear)
+float tx_dbm=0.0f;											//RF power setpoint, dBm
 
-//MMDVM stuff
-volatile uint8_t rxb[100]={0};						//rx buffer for MMDVM data
-volatile uint8_t rx_bc=0;							//UART1 rx byte counter
-uint8_t m17_buf[M17_BUFLEN][48]={0};				//M17 frame buffer
-uint8_t m17_buf_idx_wr=1;							//current frame buffer index (for writing)
-uint8_t m17_buf_idx_rd=0;							//current frame buffer index (for reading)
-uint32_t m17_symbols=192;							//how many symbols (frames*192) have been received so far (starts at 192)
-uint32_t m17_sym_ctr=0;								//consumed symbols counter
-uint8_t m17_samples=0;								//modulo M17_SPS counter for baseband sampling
-enum tx_state_t tx_state=TX_IDLE;					//transmitter state
-volatile uint8_t bsb_tx_pend=0;						//do we need to transmit another baseband sample?
-volatile enum mmdvm_comm_t mmdvm_comm=COMM_IDLE;	//MMDVM comm status
-float m17_bsb_buff[M17_FLT_LEN]={0};				//delay line for the baseband filter
+//interface stuff
+volatile uint8_t rxb[100]={0};								//rx buffer for interface data
+volatile uint8_t rx_bc=0;									//UART1 rx byte counter
+uint8_t m17_buf[M17_BUFLEN][48]={0};						//M17 frame buffer
+uint8_t m17_buf_idx_wr=1;									//current frame buffer index (for writing)
+uint8_t m17_buf_idx_rd=0;									//current frame buffer index (for reading)
+uint32_t m17_symbols=192;									//how many symbols (frames*192) have been received so far (starts at 192)
+uint32_t m17_sym_ctr=0;										//consumed symbols counter
+uint8_t m17_samples=0;										//modulo M17_SPS counter for baseband sampling
+enum tx_state_t tx_state=TX_IDLE;							//transmitter state
+volatile uint8_t bsb_tx_pend=0;								//do we need to transmit another baseband sample?
+volatile enum interface_comm_t interface_comm=COMM_IDLE;	//interface comm status
+float m17_bsb_buff[M17_FLT_LEN]={0};						//delay line for the baseband filter
 
 //ADC stuff
-uint32_t adc_vals[3]={0};						//raw values read from ADC channels 0, 1, and 2
+uint32_t adc_vals[3]={0};									//raw values read from ADC channels 0, 1, and 2
 
 //AD8318 RF power sensor cal data (consts for now)
 //based on 2-point linear approximation
@@ -568,40 +568,35 @@ float m17_map_symbol(uint8_t dibit)
 	return 0.0f;
 }
 
+void interface_resp(enum cmd_t cmd, uint8_t resp)
+{
+	uint8_t tmp[3]={cmd, 3, resp};
+	HAL_UART_Transmit_IT(&huart1, tmp, 3);
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	TIM_TypeDef* tim = htim->Instance;
 
-	#ifndef BODGEWIRE_TX
-	//baseband sampler timer
-	if(tim==TIM7)
-	{
-		bsb_tx_pend=1;
-	}
-
 	//USART1 timeout timer
-	else
-	#endif
 	if(tim==TIM6)
 	{
 		HAL_TIM_Base_Stop_IT(&htim6);
 
-		if(mmdvm_comm==COMM_IDLE)
+		if(interface_comm==COMM_IDLE)
 		{
-			mmdvm_comm=COMM_TOT; //set the TOT flag
+			interface_comm=COMM_TOT; //set the TOT flag
 		}
 	}
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-	#ifdef BODGEWIRE_TX
 	if(GPIO_Pin==TX_TRIG_Pin)
 	{
 		bsb_tx_pend=1;
 	}
 	//else
-	#endif
 	/*if(GPIO_Pin==RX_TRIG_Pin)
 	{
 		;
@@ -615,11 +610,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	if(iface==USART1)
 	{
 		//check frame's validity
-		if(rxb[0]==0xE0 && rxb[1]==rx_bc+1)
+		if(rxb[1]==rx_bc+1)
 		{
 			HAL_TIM_Base_Stop_IT(&htim6);
 			rx_bc=0;
-			mmdvm_comm=COMM_RDY;
+			interface_comm=COMM_RDY;
 			return;
 		}
 
@@ -635,7 +630,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		}
 		else //overflow
 		{
-			mmdvm_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
+			interface_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
 		}
 	}
 }
@@ -728,10 +723,8 @@ int main(void)
   }
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
-  rf_pa_en(1);
-  dbg_print(TERM_YELLOW, "[INFO] PA_EN asserted\n");
 
-  //enable MMDVM comms over UART1
+  //enable interface comms over UART1
   //memset((uint8_t*)rxb, 0, sizeof(rxb));
   HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 
@@ -739,7 +732,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while(0) //PA test
+  /*while(0) //PA test
   {
 	  float fwd=0.0, ref=0.0, temp=0.0, swr=0.0;
 
@@ -773,71 +766,128 @@ int main(void)
 	  uint8_t val=trx_readreg(CHIP_RX, 0x2F7D);
 	  //HAL_UART_Transmit(&huart3, &val, 1, 10);
 	  set_dac_ch2((int8_t)val*31+2048);
-  }
+  }*/
 
-  while(1) //MMDVM TX test
+  while(1) //interface test
   {
-	  if(mmdvm_comm==COMM_RDY) //if a valid MMDVM frame is detected
+	  if(interface_comm==COMM_RDY) //if a valid interface frame is detected
 	  {
 		  set_TP(TP1, 1);
 		  HAL_UART_AbortReceive_IT(&huart1);
 		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
-		  mmdvm_comm=COMM_IDLE;
+		  interface_comm=COMM_IDLE;
 		  set_TP(TP1, 0);
 
 		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[2], rxb[1]);
-		  uint8_t cmd=rxb[2];
 
-		  if(cmd==0x00) //"Get Version"
+		  uint32_t freq;
+		  uint8_t ident[128]={0};
+
+		  switch(rxb[0])
 		  {
-			  //reply with RRU ident string
-			  uint8_t ident[70];
-			  sprintf((char*)&ident[4], IDENT_STR);
-			  ident[0]=0xE0; //header
-			  ident[2]=0x00; //a reply to "Get Version" command
-			  ident[3]=0x01; //protocol version
-			  ident[1]=strlen((char*)&ident[4])+4; //total length
-			  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
+		  	  case CMD_PING:
+		  		  interface_resp(CMD_PING, 0); //OK
+		  	  break;
+
+		  	  case CMD_SET_RX_FREQ:
+		  		memcpy((uint8_t*)&freq, (uint8_t*)&rxb[2], sizeof(uint32_t));
+		  		if(freq>=420e6 && freq<=440e6)
+		  		{
+					dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
+					//reconfig RX
+					trx_data[CHIP_RX].frequency=freq;
+					config_rf(CHIP_RX, trx_data[CHIP_RX]); //optimize this later
+					interface_resp(CMD_SET_RX_FREQ, 0); //OK
+		  		}
+		  		else
+		  		{
+		  			dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested RX frequency of %ld Hz is out of range\n", freq);
+		  			interface_resp(CMD_SET_RX_FREQ, 1); //ERR
+		  		}
+		  	  break;
+
+		  	  case CMD_SET_TX_FREQ:
+				memcpy((uint8_t*)&freq, (uint8_t*)&rxb[2], sizeof(uint32_t)); //no sanity checks
+				if(freq>=420e6 && freq<=440e6)
+				{
+					dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
+					//reconfig TX
+					trx_data[CHIP_TX].frequency=freq;
+					config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
+					interface_resp(CMD_SET_TX_FREQ, 0); //OK
+		  	  	  }
+		  		  else
+		  		  {
+		  		  	dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested TX frequency of %ld Hz is out of range\n", freq);
+		  		  	interface_resp(CMD_SET_TX_FREQ, 1); //ERR
+		  		  }
+			  break;
+
+		  	  case CMD_SET_TX_POWER:
+				  tx_dbm=rxb[2]*0.25f;
+				  if(tx_dbm>=30.0f && tx_dbm<=47.75) //about 1 to 60W out
+				  {
+					  dbg_print(0, "[INTRFC_CMD] TX PWR %2.2f dBm\n", tx_dbm);
+					  alc_set=dbm_to_alc(tx_dbm);
+					  interface_resp(CMD_SET_TX_POWER, 0); //OK
+				  }
+				  else
+				  {
+					  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested output power is out of range\n");
+					  interface_resp(CMD_SET_TX_POWER, 1); //ERR
+				  }
+			  break;
+
+		  	  case CMD_SET_PA_EN:
+		  		  if(rxb[2])
+		  		  {
+		  			  rf_pa_en(1);
+		  			  dbg_print(0, "[INTRFC_CMD] PA_EN=1\n");
+		  		  }
+		  		  else
+		  		  {
+		  			  rf_pa_en(0);
+		  			  dbg_print(0, "[INTRFC_CMD] PA_EN=0\n");
+		  		  }
+			  break;
+
+		  	  case CMD_SET_TX_START:
+		  		  if(tx_state==TX_IDLE)
+		  		  {
+		  			tx_state=TX_ACTIVE;
+		  			trx_data[CHIP_TX].pwr=63;
+		  			trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  			set_rf_pwr_setpoint(alc_set);
+		  			dbg_print(0, "TX -> start\n");
+		  			//fill the preamble
+		  			memset((uint8_t*)&m17_buf[0][0], 0b01110111, 48);
+		  			//initiate baseband SPI transfer to the transmitter
+		  			uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
+		  			set_CS(CHIP_TX, 0); //CS low
+		  			HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
+		  			HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
+		  			//set_TP(TP2, 1); //debug
+		  		  }
+			  break;
+
+		  	  case CMD_GET_IDENT:
+				  //reply with RRU's IDENT string
+				  sprintf((char*)&ident[2], IDENT_STR);
+				  ident[0]=0x80; //a reply to "Get IDENT string" command
+				  ident[1]=strlen((char*)&ident[2])+2; //total length
+				  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
+			  break;
+
+		  	  case CMD_GET_CAPS:
+				  //so far the RRU can do FM only
+				  interface_resp(CMD_SET_TX_POWER, 0x02);
+			  break;
+
+		  	  default:
+		  		  ;
+		  	  break;
 		  }
-		  else if(cmd==0x04) //"???" - set RX/TX frequencies etc. TODO: I'm not sure if 0x04 command sets power output
-		  {
-			  uint32_t rx_freq, tx_freq;
-			  memcpy((uint8_t*)&rx_freq, (uint8_t*)&rxb[4], sizeof(uint32_t));
-			  memcpy((uint8_t*)&tx_freq, (uint8_t*)&rxb[8], sizeof(uint32_t));
-			  dbg_print(0, "[MMDVM_CMD] RX %ld Hz\n[MMDVM_CMD] TX %ld Hz\n", rx_freq, tx_freq);
-			  //reconfig TRXs
-			  trx_data[CHIP_RX].frequency=rx_freq;
-			  trx_data[CHIP_TX].frequency=tx_freq;
-			  config_rf(CHIP_RX, trx_data[CHIP_RX]);
-			  config_rf(CHIP_TX, trx_data[CHIP_TX]);
-			  tx_dbm=40;
-			  alc_set=dbm_to_alc(tx_dbm);
-			  dbg_print(TERM_YELLOW, "[INFO] ALC=%d (%2.1fdBm)\n",alc_set, tx_dbm);
-			  //ACK it
-			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
-			  HAL_UART_Transmit_IT(&huart1, ack, 4);
-		  }
-		  else if(cmd==0x02) //"Set Config"
-		  {
-			  //for now just reply with an ACK
-			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
-			  HAL_UART_Transmit_IT(&huart1, ack, 4);
-		  }
-		  else if(cmd==0x03) //"Set Mode"
-		  {
-			  //for now just reply with an ACK
-			  uint8_t ack[4]={0xE0, 0x04, 0x70, cmd};
-			  HAL_UART_Transmit_IT(&huart1, ack, 4);
-		  }
-		  else if(cmd==0x01) //"Get Status"
-		  {
-			  //reply with a hardcoded sequence
-			  uint8_t reply[14]={0xE0, 0x0E, 0x01, 0x80,
-			  	  	  	  	  	0x00, 0x00, 0x00, 0x00,
-								0x00, 0x00, 0x00, 0x00,
-			  	  	  	  	  	0x00, 0x1F};
-			  HAL_UART_Transmit_IT(&huart1, reply, 14);
-		  }
+		  /*
 		  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
 		  {
 			  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
@@ -859,25 +909,19 @@ int main(void)
 				  //initiate baseband SPI transfer to the transmitter
 				  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
 				  set_CS(CHIP_TX, 0); //CS low
-				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 3-byte header
-				  #ifdef BODGEWIRE_TX
+				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
 				  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
-				  #else
-				  TIM7->CNT=0;
-				  //FIX_TIMER_TRIGGER(&htim7);
-				  HAL_TIM_Base_Start_IT(&htim7); //internal baseband sample timer
-				  #endif
 				  //set_TP(TP2, 1); //debug
 			  }
-		  }
+		  }*/
 	  }
-	  else if(mmdvm_comm==COMM_TOT || mmdvm_comm==COMM_OVF)
+	  else if(interface_comm==COMM_TOT || interface_comm==COMM_OVF)
 	  {
 		  HAL_TIM_Base_Stop_IT(&htim6);
 		  HAL_UART_AbortReceive_IT(&huart1);
 		  rx_bc=0;
 		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
-		  mmdvm_comm=COMM_IDLE;
+		  interface_comm=COMM_IDLE;
 	  }
 
 	  if(bsb_tx_pend==1)
@@ -925,11 +969,7 @@ int main(void)
 		  //nothing else to transmit
 		  if(m17_sym_ctr==m17_symbols)
 		  {
-			  #ifdef BODGEWIRE_TX
 			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
-			  #else
-			  HAL_TIM_Base_Stop_IT(&htim7); //internal baseband sample timer
-			  #endif
 			  trx_data[CHIP_TX].pwr=3;
 			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 			  set_rf_pwr_setpoint(0);
@@ -1246,7 +1286,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 460800;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;

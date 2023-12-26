@@ -21,9 +21,10 @@
 | 0x08    | 2          | Reception stop/start              | 0/1                       | 0/1                     |
 | ...     | ...        | ...                               | ...                       | ...                     |
 | 0x80    | 2          | Get IDENT string                  | -                         | IDENT string            |
-| 0x81    | 2          | Get RX frequency                  | -                         | 32-bit frequency in Hz  |
-| 0x82    | 2          | Get TX frequency                  | -                         | 32-bit frequency in Hz  |
-| 0x83    | 2          | Get frequency correction          | -                         | 16-bit value, signed    |
+| 0x81    | 2          | Get device's capabilities         | -                         | 8-bit value             |
+| 0x82    | 2          | Get RX frequency                  | -                         | 32-bit frequency in Hz  |
+| 0x83    | 2          | Get TX frequency                  | -                         | 32-bit frequency in Hz  |
+| 0x84    | 2          | Get frequency correction          | -                         | 16-bit value, signed    |
 | ...     | ...        | ...                               | ...                       | ...                     |
 
 All values are little-endian. Return value of 0 means success, any other value is an error code.
@@ -31,3 +32,12 @@ Parameter of 0 disables the function, 1 enables it.
 
 [1] 0.25dBm steps, starting at 0.0dBm: P[dBm]=value*0.25<br>
 [2] This is an arbitrary unit, **not** ppm<br>
+
+### Device's capabilities
+
+| Flag | Meaning                                     |
+|------|---------------------------------------------|
+| 0x01 | Amplitude modulation (incl. CW)             |
+| 0x02 | Frequency modulation (incl. M17 and AFSK)   |
+| 0x04 | Single sideband (incl. FreeDV)              |
+| 0x08 | Phase shift keying (incl. pi/4-DQPSK)       |
