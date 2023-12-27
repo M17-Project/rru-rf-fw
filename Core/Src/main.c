@@ -40,6 +40,7 @@
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
 #define BSB_BUFLEN		4800					//tx/rx buffer size in samples (200ms at fs=24kHz)
+#define BSB_RUNUP		2880					//120ms worth of baseband data (at 24kHz)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -593,7 +594,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		else
 		{
 			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
-			tx_bsb_buff[(2400+tx_bsb_total_cnt)%BSB_BUFLEN]=rxb[0];
+			tx_bsb_buff[(BSB_RUNUP+tx_bsb_total_cnt)%BSB_BUFLEN]=rxb[0];
 			tx_bsb_total_cnt++;
 		}
 	}
@@ -832,8 +833,8 @@ int main(void)
 		  			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 
 		  			//fill the run-up
-		  			memset((uint8_t*)tx_bsb_buff, 0, 2400);
-		  			tx_bsb_total_cnt=2400;
+		  			memset((uint8_t*)tx_bsb_buff, 0, BSB_RUNUP);
+		  			tx_bsb_total_cnt=BSB_RUNUP;
 
 		  			//initiate baseband SPI transfer to the transmitter
 		  			uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
