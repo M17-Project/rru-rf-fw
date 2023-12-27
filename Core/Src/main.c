@@ -592,8 +592,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		}
 		else
 		{
-			tx_bsb_buff[(2400+tx_bsb_total_cnt)%BSB_BUFLEN]=rxb[0];
 			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
+			tx_bsb_buff[(2400+tx_bsb_total_cnt)%BSB_BUFLEN]=rxb[0];
+			tx_bsb_total_cnt++;
 		}
 	}
 }
