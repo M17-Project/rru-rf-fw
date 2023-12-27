@@ -1,7 +1,7 @@
 /*
  * interface_cmds.h
  *
- *  Created on: Dec 26, 2023
+ *  Created on: Dec 27, 2023
  *      Author: SP5WWP
  */
 
@@ -16,7 +16,7 @@ enum cmd_t
 	CMD_SET_RX_FREQ,
 	CMD_SET_TX_FREQ,
 	CMD_SET_TX_POWER,
-	CMD_SET_PA_EN,
+	CMD_SET_RESERVED,
 	CMD_SET_FREQ_CORR,
 	CMD_SET_AFC,
 	CMD_SET_TX_START,
@@ -27,6 +27,7 @@ enum cmd_t
 	CMD_GET_CAPS,
 	CMD_GET_RX_FREQ,
 	CMD_GET_TX_FREQ,
+	CMD_GET_TX_POWER,
 	CMD_GET_FREQ_CORR
 };
 

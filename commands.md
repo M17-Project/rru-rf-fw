@@ -14,17 +14,18 @@
 | 0x01    | 6          | Set RX frequency                  | 32-bit frequency in Hz    | 0/1                     |
 | 0x02    | 6          | Set TX frequency                  | 32-bit frequency in Hz    | 0/1                     |
 | 0x03    | 3          | Set TX power                      | 8-bit value, unsigned[1]  | 0/1                     |
-| 0x04    | 3          | Set PA_EN pin state               | 0/1                       | 0/1                     |
+| 0x04    | -          | Reserved                          | -                         | -                       |
 | 0x05    | 4          | Set frequency correction          | 16-bit value, signed[2]   | 0/1                     |
 | 0x06    | 2          | Automatic Frequency Control (AFC) | 0/1                       | 0/1                     |
-| 0x07    | 2          | Transmission start                | -                         | 0/1                     |
-| 0x08    | 2          | Reception stop/start              | 0/1                       | 0/1                     |
+| 0x07    | 2          | Transmission start                | -                         | -                       |
+| 0x08    | 3          | Reception stop/start              | 0/1                       | 0/1 at RX end only      |
 | ...     | ...        | ...                               | ...                       | ...                     |
 | 0x80    | 2          | Get IDENT string                  | -                         | IDENT string            |
 | 0x81    | 2          | Get device's capabilities         | -                         | 8-bit value             |
 | 0x82    | 2          | Get RX frequency                  | -                         | 32-bit frequency in Hz  |
 | 0x83    | 2          | Get TX frequency                  | -                         | 32-bit frequency in Hz  |
-| 0x84    | 2          | Get frequency correction          | -                         | 16-bit value, signed    |
+| 0x84    | 2          | Get TX power                      | -                         | 8-bit value, signed[1]  |
+| 0x85    | 2          | Get frequency correction          | -                         | 16-bit value, signed    |
 | ...     | ...        | ...                               | ...                       | ...                     |
 
 All values are little-endian. Return value of 0 means success, any other value is an error code.
@@ -35,9 +36,11 @@ Parameter of 0 disables the function, 1 enables it.
 
 ### Device's capabilities
 
-| Flag | Meaning                                     |
-|------|---------------------------------------------|
-| 0x01 | Amplitude modulation (incl. CW)             |
-| 0x02 | Frequency modulation (incl. M17 and AFSK)   |
-| 0x04 | Single sideband (incl. FreeDV)              |
-| 0x08 | Phase shift keying (incl. pi/4-DQPSK)       |
+| Flag       | Meaning                                     |
+|------------|---------------------------------------------|
+| 0x01       | Amplitude modulation (incl. CW)             |
+| 0x02       | Frequency modulation (incl. M17 and AFSK)   |
+| 0x04       | Single sideband (incl. FreeDV)              |
+| 0x08       | Phase shift keying (incl. pi/4-DQPSK)       |
+| 0x10..0x40 | Reserved                                    |
+| 0x80       | Simplex=0/duplex=1                          |

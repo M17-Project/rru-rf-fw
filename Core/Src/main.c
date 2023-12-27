@@ -25,7 +25,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
-#include "m17_rrc.h"
 #include "term.h"
 #include "interface_cmds.h"
 /* USER CODE END Includes */
@@ -39,10 +38,8 @@
 /* USER CODE BEGIN PD */
 #define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
-#define CC1200_REG_NUM	51
-#define M17_SPS			5						//samples per symbol
-#define M17_FLT_LEN		FLT_LEN_5
-#define M17_BUFLEN		12						//M17 buffer depth in frames
+#define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
+#define BSB_BUFLEN		4800					//tx/rx buffer size in samples (200ms at fs=24kHz)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -65,35 +62,7 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-enum trx_t
-{
-	CHIP_RX,
-	CHIP_TX
-};
-
-enum tp_t
-{
-	TP1,
-	TP2
-};
-
-enum transf_t
-{
-	TX_SINGLE,
-	TX_BURST,
-	RX_SINGLE,
-	RX_BURST
-};
-
-enum strobe_t
-{
-	STR_SRES = 0x30,		//reset
-	STR_SCAL = 0x33,		//calibrate
-	STR_SRX,				//set state to "receive"
-	STR_STX,				//set state to "transmit"
-	STR_IDLE,				//set state to "idle"
-	STR_SNOP = 0x3D			//no operation
-};
+#include "enums.h"
 
 struct trx_data_t
 {
@@ -104,37 +73,24 @@ struct trx_data_t
 	uint8_t pll_locked;		//PLL locked flag
 }trx_data[2];
 
-enum tx_state_t
-{
-	TX_IDLE,
-	TX_ACTIVE
-};
-
-enum interface_comm_t
-{
-	COMM_IDLE,
-	COMM_RDY,
-	COMM_TOT,
-	COMM_OVF
-};
-
 //PA
 uint16_t alc_set=0;											//automatic level control setting (nonlinear)
 float tx_dbm=0.0f;											//RF power setpoint, dBm
 
-//interface stuff
+//buffers and interface stuff
 volatile uint8_t rxb[100]={0};								//rx buffer for interface data
 volatile uint8_t rx_bc=0;									//UART1 rx byte counter
-uint8_t m17_buf[M17_BUFLEN][48]={0};						//M17 frame buffer
-uint8_t m17_buf_idx_wr=1;									//current frame buffer index (for writing)
-uint8_t m17_buf_idx_rd=0;									//current frame buffer index (for reading)
-uint32_t m17_symbols=192;									//how many symbols (frames*192) have been received so far (starts at 192)
-uint32_t m17_sym_ctr=0;										//consumed symbols counter
-uint8_t m17_samples=0;										//modulo M17_SPS counter for baseband sampling
-enum tx_state_t tx_state=TX_IDLE;							//transmitter state
+int8_t tx_bsb_buff[BSB_BUFLEN]={0};							//buffer for transmission
+uint32_t tx_bsb_total_cnt=0;								//how many samples were received
+uint32_t tx_bsb_cnt=0;										//how many samples were transmitted
+int8_t tx_bsb_sample=0;										//current tx sample
+int8_t rx_bsb_sample=0;										//current rx sample
+
+enum trx_state_t tx_state=TX_IDLE;							//transmitter state
+enum trx_state_t rx_state=RX_IDLE;							//receiver state
 volatile uint8_t bsb_tx_pend=0;								//do we need to transmit another baseband sample?
+volatile uint8_t bsb_rx_pend=0;								//do we need to read another baseband sample?
 volatile enum interface_comm_t interface_comm=COMM_IDLE;	//interface comm status
-float m17_bsb_buff[M17_FLT_LEN]={0};						//delay line for the baseband filter
 
 //ADC stuff
 uint32_t adc_vals[3]={0};									//raw values read from ADC channels 0, 1, and 2
@@ -146,9 +102,9 @@ uint32_t adc_vals[3]={0};									//raw values read from ADC channels 0, 1, and 
 //0.64		0.0
 //1.85		-50.0
 const float cal_a		= -41.3223140495868f;	//dBm/V
-const float cal_b		= 26.4462809917355f;	//dBm
-const float cal_offs	= 62.5f;				//dB
-const float cal_corr	= -3.6f;				//dB
+const float cal_b		=  26.4462809917355f;	//dBm
+const float cal_offs	=  62.5f;				//dB
+const float cal_corr	=  -3.6f;				//dB
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -596,10 +552,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	{
 		bsb_tx_pend=1;
 	}
-	//else
-	/*if(GPIO_Pin==RX_TRIG_Pin)
+	/*else if(GPIO_Pin==RX_TRIG_Pin)
 	{
-		;
+		bsb_rx_pend=1;
 	}*/
 }
 
@@ -609,28 +564,36 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 	if(iface==USART1)
 	{
-		//check frame's validity
-		if(rxb[1]==rx_bc+1)
+		if(tx_state==TX_IDLE)
 		{
-			HAL_TIM_Base_Stop_IT(&htim6);
-			rx_bc=0;
-			interface_comm=COMM_RDY;
-			return;
-		}
+			//check frame's validity
+			if(rxb[1]==rx_bc+1)
+			{
+				HAL_TIM_Base_Stop_IT(&htim6);
+				rx_bc=0;
+				interface_comm=COMM_RDY;
+				return;
+			}
 
-		//handle overflow
-		if(rx_bc<sizeof(rxb)) //all normal - proceed
-		{
-			rx_bc++;
-			HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxb[rx_bc], 1);
-			//reset timeout timer
-			TIM6->CNT=0;
-			FIX_TIMER_TRIGGER(&htim6);
-			HAL_TIM_Base_Start_IT(&htim6);
+			//handle overflow
+			if(rx_bc<sizeof(rxb)) //all normal - proceed
+			{
+				rx_bc++;
+				HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxb[rx_bc], 1);
+				//reset timeout timer
+				TIM6->CNT=0;
+				FIX_TIMER_TRIGGER(&htim6);
+				HAL_TIM_Base_Start_IT(&htim6);
+			}
+			else //overflow
+			{
+				interface_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
+			}
 		}
-		else //overflow
+		else
 		{
-			interface_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
+			tx_bsb_buff[(2400+tx_bsb_total_cnt)%BSB_BUFLEN]=rxb[0];
+			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 		}
 	}
 }
@@ -673,9 +636,12 @@ int main(void)
   MX_TIM6_Init();
   MX_TIM7_Init();
   /* USER CODE BEGIN 2 */
+  //enable FPU
   #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
 	SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));  /* set CP10 and CP11 Full Access */
   #endif
+
+  //default settings
   set_rf_pwr_setpoint(0);
   set_dac_ch2(0); //can be used for debugging
   rf_pa_en(0);
@@ -690,14 +656,17 @@ int main(void)
   dbg_print(0, TERM_CLR); //clear console and print out ident string
   dbg_print(TERM_GREEN, IDENT_STR); dbg_print(0,  "\n");
 
-  HAL_Delay(100);
+  HAL_Delay(10);
   detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
   dbg_print(0, "RX IC: %s\nTX IC: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
 
-  trx_data[CHIP_RX].frequency=433475000; //default
+  trx_data[CHIP_RX].frequency=433475000;				//default
   trx_data[CHIP_TX].frequency=435000000;
-  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=-9; //shared clock source, thus the same corr
-  trx_data[CHIP_TX].pwr=3; //3 to 63
+  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=0;	//shared clock source, thus the same corr
+  trx_data[CHIP_TX].pwr=3;								//3 to 63
+  tx_dbm=30.00f;										//30dBm (1W) default
+  alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
+  set_rf_pwr_setpoint(alc_set);							//set ALC
 
   dbg_print(0, "Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
@@ -790,65 +759,61 @@ int main(void)
 		  	  break;
 
 		  	  case CMD_SET_RX_FREQ:
-		  		memcpy((uint8_t*)&freq, (uint8_t*)&rxb[2], sizeof(uint32_t));
-		  		if(freq>=420e6 && freq<=440e6)
-		  		{
-					dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
-					//reconfig RX
-					trx_data[CHIP_RX].frequency=freq;
-					config_rf(CHIP_RX, trx_data[CHIP_RX]); //optimize this later
-					interface_resp(CMD_SET_RX_FREQ, 0); //OK
-		  		}
-		  		else
-		  		{
-		  			dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested RX frequency of %ld Hz is out of range\n", freq);
-		  			interface_resp(CMD_SET_RX_FREQ, 1); //ERR
-		  		}
+		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[2], sizeof(uint32_t));
+		  		  if(freq>=420e6 && freq<=440e6)
+		  		  {
+		  			  dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
+		  			  //reconfig RX
+		  			  trx_data[CHIP_RX].frequency=freq;
+		  			  config_rf(CHIP_RX, trx_data[CHIP_RX]); //optimize this later
+		  			  interface_resp(CMD_SET_RX_FREQ, 0); //OK
+		  		  }
+		  		  else
+		  		  {
+		  			  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested RX frequency of %ld Hz is out of range\n", freq);
+		  			  interface_resp(CMD_SET_RX_FREQ, 1); //ERR
+		  		  }
 		  	  break;
 
 		  	  case CMD_SET_TX_FREQ:
-				memcpy((uint8_t*)&freq, (uint8_t*)&rxb[2], sizeof(uint32_t)); //no sanity checks
-				if(freq>=420e6 && freq<=440e6)
-				{
-					dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
-					//reconfig TX
-					trx_data[CHIP_TX].frequency=freq;
-					config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
-					interface_resp(CMD_SET_TX_FREQ, 0); //OK
-		  	  	  }
+		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[2], sizeof(uint32_t)); //no sanity checks
+		  		  if(freq>=420e6 && freq<=440e6)
+		  		  {
+		  			  dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
+		  			  //reconfig TX
+		  			  trx_data[CHIP_TX].frequency=freq;
+		  			  config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
+		  			  interface_resp(CMD_SET_TX_FREQ, 0); //OK
+		  		  }
 		  		  else
 		  		  {
-		  		  	dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested TX frequency of %ld Hz is out of range\n", freq);
-		  		  	interface_resp(CMD_SET_TX_FREQ, 1); //ERR
+		  			  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested TX frequency of %ld Hz is out of range\n", freq);
+		  			  interface_resp(CMD_SET_TX_FREQ, 1); //ERR
 		  		  }
 			  break;
 
 		  	  case CMD_SET_TX_POWER:
-				  tx_dbm=rxb[2]*0.25f;
-				  if(tx_dbm>=30.0f && tx_dbm<=47.75) //about 1 to 60W out
+				  if(rxb[2]*0.25f>=30.0f && rxb[2]*0.25f<=47.75) //about 1 to 60W out
 				  {
+					  tx_dbm=rxb[2]*0.25f;
 					  dbg_print(0, "[INTRFC_CMD] TX PWR %2.2f dBm\n", tx_dbm);
 					  alc_set=dbm_to_alc(tx_dbm);
 					  interface_resp(CMD_SET_TX_POWER, 0); //OK
 				  }
 				  else
 				  {
+					  //no change, return error code
 					  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested output power is out of range\n");
 					  interface_resp(CMD_SET_TX_POWER, 1); //ERR
 				  }
 			  break;
 
-		  	  case CMD_SET_PA_EN:
-		  		  if(rxb[2])
-		  		  {
-		  			  rf_pa_en(1);
-		  			  dbg_print(0, "[INTRFC_CMD] PA_EN=1\n");
-		  		  }
-		  		  else
-		  		  {
-		  			  rf_pa_en(0);
-		  			  dbg_print(0, "[INTRFC_CMD] PA_EN=0\n");
-		  		  }
+		  	  case CMD_SET_FREQ_CORR:
+		  		  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=*((int16_t*)&rxb[2]); //shared clock source, thus the same corr
+		  		  config_rf(CHIP_RX, trx_data[CHIP_RX]); //optimize this later
+		  		  config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
+		  		  dbg_print(0, "[INTRFC_CMD] Frequency correction: %d\n", *((int16_t*)&rxb[2]));
+		  		  interface_resp(CMD_SET_TX_POWER, 0); //OK
 			  break;
 
 		  	  case CMD_SET_TX_START:
@@ -858,15 +823,46 @@ int main(void)
 		  			trx_data[CHIP_TX].pwr=63;
 		  			trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 		  			set_rf_pwr_setpoint(alc_set);
+		  			rf_pa_en(1);
 		  			dbg_print(0, "TX -> start\n");
-		  			//fill the preamble
-		  			memset((uint8_t*)&m17_buf[0][0], 0b01110111, 48);
+
+		  			//stop UART timeout timer
+		  			HAL_TIM_Base_Stop_IT(&htim6);
+		  			HAL_UART_AbortReceive_IT(&huart1);
+		  			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
+
+		  			//fill the run-up
+		  			memset((uint8_t*)tx_bsb_buff, 0, 2400);
+		  			tx_bsb_total_cnt=2400;
+
 		  			//initiate baseband SPI transfer to the transmitter
 		  			uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
 		  			set_CS(CHIP_TX, 0); //CS low
 		  			HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
-		  			HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
+		  			HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external baseband sample trigger signal
 		  			//set_TP(TP2, 1); //debug
+		  		  }
+			  break;
+
+		  	  case CMD_SET_RX:
+		  		  if(rxb[2]) //start
+		  		  {
+		  			  if(rx_state==RX_IDLE)
+		  			  {
+		  				  rx_state=RX_ACTIVE;
+		  				  //initiate baseband SPI transfer from the receiver
+		  				  uint8_t header[2]={0x2F|0x40, 0x7D}; //CFM_RX_DATA_OUT, burst access
+		  				  set_CS(CHIP_RX, 0); //CS low
+		  				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
+		  				  //HAL_NVIC_EnableIRQ(); //enable external read baseband sample trigger
+		  			  }
+		  		  }
+		  		  else //stop
+		  		  {
+		  			  //HAL_NVIC_DisableIRQ(); //disable external read baseband sample trigger signal
+		  			  set_CS(CHIP_RX, 1); //CS high
+		  			  rx_state=RX_IDLE;
+		  			  interface_resp(CMD_SET_RX, 0); //OK
 		  		  }
 			  break;
 
@@ -879,41 +875,14 @@ int main(void)
 			  break;
 
 		  	  case CMD_GET_CAPS:
-				  //so far the RRU can do FM only
-				  interface_resp(CMD_SET_TX_POWER, 0x02);
+				  //so far the RRU can do FM only, duplex
+				  interface_resp(CMD_SET_TX_POWER, 0x82);
 			  break;
 
 		  	  default:
 		  		  ;
 		  	  break;
 		  }
-		  /*
-		  else if(cmd==0x45 || cmd==0x46) //M17 LSF frame data or stream frame data
-		  {
-			  //HAL_UART_Transmit(&huart3, (uint8_t*)&rxb[4], 48, 6); //debug data dump
-			  memcpy((uint8_t*)&m17_buf[m17_buf_idx_wr][0], (uint8_t*)&rxb[4], 48);
-			  m17_symbols+=192;
-			  m17_buf_idx_wr++;
-			  m17_buf_idx_wr%=M17_BUFLEN;
-			  //start transmitting only after receiving some frames
-			  //to avoid possible buffer underflows
-			  if(tx_state==TX_IDLE && m17_buf_idx_wr>2)
-			  {
-				  tx_state=TX_ACTIVE;
-				  trx_data[CHIP_TX].pwr=63;
-				  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
-				  set_rf_pwr_setpoint(alc_set);
-				  dbg_print(0, "TX -> start\n");
-				  //fill the preamble
-				  memset((uint8_t*)&m17_buf[0][0], 0b01110111, 48);
-				  //initiate baseband SPI transfer to the transmitter
-				  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
-				  set_CS(CHIP_TX, 0); //CS low
-				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
-				  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
-				  //set_TP(TP2, 1); //debug
-			  }
-		  }*/
 	  }
 	  else if(interface_comm==COMM_TOT || interface_comm==COMM_OVF)
 	  {
@@ -926,66 +895,44 @@ int main(void)
 
 	  if(bsb_tx_pend==1)
 	  {
-		  static float f_bsb_sample=0.0f;
+		  //debug
+		  set_TP(TP2, 1);
 
-		  set_TP(TP2, 1); //debug
-		  m17_samples++;
+		  //send baseband sample ASAP
+		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&tx_bsb_sample, 1, 2);
+		  //set_dac_ch2(bsb_sample*31+2048); //debug - check how the signal looks like
 
-		  //scaling factor required to get +2.4k deviation for +3 symbol
-		  int8_t bsb_sample=roundf(f_bsb_sample*23.08f);
-		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&bsb_sample, 1, 2); //send baseband sample ASAP
-		  //set_dac_ch2(bsb_sample*31+2048); //debug - check if we don't overflow int8_t
-
-		  //push buffer
-		  for(uint8_t i=M17_FLT_LEN-1; i>0; i--)
-		  {
-			  m17_bsb_buff[i]=m17_bsb_buff[i-1];
-		  }
-
-		  //fetch next sample
-		  if(m17_samples==M17_SPS)
-		  {
-			  uint8_t dibit=0;
-			  //take another dibit from the buffer
-			  dibit=(m17_buf[m17_buf_idx_rd][(m17_sym_ctr/4)%48]>>(6-(m17_sym_ctr%4)*2)) & 0b11;
-
-			  //map to a symbol and push to buffer
-			  m17_bsb_buff[0]=m17_map_symbol(dibit);
-
-			  m17_samples=0;
-			  m17_sym_ctr++;
-			  m17_buf_idx_rd=(m17_sym_ctr/192)%M17_BUFLEN;
-		  }
-		  else
-		  {
-			  m17_bsb_buff[0]=0.0f;
-		  }
-
-		  //calculate next baseband sample
-		  f_bsb_sample=0.0f;
-		  for(uint8_t i=0; i<M17_FLT_LEN; i++)
-		  	  f_bsb_sample+=rrc_taps_5[i]*m17_bsb_buff[i];
+		  //fetch another sample
+		  tx_bsb_sample=tx_bsb_buff[tx_bsb_cnt%BSB_BUFLEN];
+		  tx_bsb_cnt++;
 
 		  //nothing else to transmit
-		  if(m17_sym_ctr==m17_symbols)
+		  if(tx_bsb_cnt==tx_bsb_total_cnt)
 		  {
-			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //external baseband sample trigger signal
-			  trx_data[CHIP_TX].pwr=3;
+			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external baseband sample trigger signal
+			  trx_data[CHIP_TX].pwr=3; //set it back to low power
 			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 			  set_rf_pwr_setpoint(0);
+			  rf_pa_en(0);
 			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
-			  m17_buf_idx_wr=1;
-			  m17_buf_idx_rd=0;
-			  m17_samples=0;
-			  m17_symbols=192;
-			  m17_sym_ctr=0;
+			  tx_bsb_cnt=0;
+			  tx_bsb_total_cnt=0;
 			  //set_TP(TP2, 0); //debug
 			  dbg_print(0, "TX -> end\n");
 		  }
 
-		  set_TP(TP2, 0); //debug
 		  bsb_tx_pend=0;
+
+		  //debug
+		  set_TP(TP2, 0);
+	  }
+
+	  if(bsb_rx_pend==1)
+	  {
+		  //fetch baseband sample
+		  rx_bsb_sample=trx_readreg(CHIP_RX, 0x2F7D);
+		  HAL_UART_Transmit_IT(&huart1, (uint8_t*)&rx_bsb_sample, 1);
 	  }
     /* USER CODE END WHILE */
 
