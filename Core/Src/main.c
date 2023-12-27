@@ -666,7 +666,6 @@ int main(void)
   trx_data[CHIP_TX].pwr=3;								//3 to 63
   tx_dbm=30.00f;										//30dBm (1W) default
   alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
-  set_rf_pwr_setpoint(alc_set);							//set ALC
 
   dbg_print(0, "Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
