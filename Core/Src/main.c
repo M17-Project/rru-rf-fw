@@ -851,7 +851,7 @@ int main(void)
 		  			  {
 		  				  rx_state=RX_ACTIVE;
 		  				  //initiate baseband SPI transfer from the receiver
-		  				  uint8_t header[2]={0x2F|0x40, 0x7D}; //CFM_RX_DATA_OUT, burst access
+		  				  uint8_t header[2]={0x2F|0xC0, 0x7D}; //CFM_RX_DATA_OUT, burst access
 		  				  set_CS(CHIP_RX, 0); //CS low
 		  				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
 		  				  //HAL_NVIC_EnableIRQ(); //enable external read baseband sample trigger
