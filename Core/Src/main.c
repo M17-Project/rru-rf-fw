@@ -36,7 +36,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define IDENT_STR		"RRU-rf-board-v1.0.0 40.0000MHz CC1200 FW by SP5WWP"
+#define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
 #define BSB_BUFLEN		4800					//tx/rx buffer size in samples (200ms at fs=24kHz)
@@ -871,7 +871,7 @@ int main(void)
 				  //reply with RRU's IDENT string
 				  sprintf((char*)&ident[2], IDENT_STR);
 				  ident[0]=0x80; //a reply to "Get IDENT string" command
-				  ident[1]=strlen((char*)&ident[2])+2; //total length
+				  ident[1]=strlen((char*)IDENT_STR)+2; //total length
 				  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
 			  break;
 
