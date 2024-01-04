@@ -752,6 +752,7 @@ int main(void)
 
 		  uint32_t freq;
 		  uint8_t ident[128]={0};
+		  uint8_t resp[10]; //response buffer
 
 		  switch(rxb[0])
 		  {
@@ -878,6 +879,20 @@ int main(void)
 		  	  case CMD_GET_CAPS:
 				  //so far the RRU can do FM only, duplex
 				  interface_resp(CMD_SET_TX_POWER, 0x82);
+			  break;
+
+		  	  case CMD_GET_RX_FREQ:
+		  		  resp[0]=CMD_GET_RX_FREQ;
+		  		  resp[1]=sizeof(uint32_t)+2;
+		  		  memcpy(&resp[2], (uint8_t*)&trx_data[CHIP_RX].frequency, sizeof(uint32_t));
+		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
+			  break;
+
+		  	  case CMD_GET_TX_FREQ:
+		  		  resp[0]=CMD_GET_TX_FREQ;
+		  		  resp[1]=sizeof(uint32_t)+2;
+		  		  memcpy(&resp[2], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
+		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
 			  break;
 
 		  	  default:
