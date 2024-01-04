@@ -358,8 +358,6 @@ void config_ic(enum trx_t trx, uint8_t* settings)
 
 void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 {
-	uint32_t freq_word=0;
-
 	static uint8_t cc1200_rx_settings[CC1200_REG_NUM*3] =
 	{
 		0x00, 0x01, 0x08,
@@ -470,7 +468,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x2F, 0x91, 0x08
 	};
 
-	freq_word=roundf((float)trx_data.frequency/5000000.0*((uint32_t)1<<16));
+	uint32_t freq_word=roundf((float)trx_data.frequency/5000000.0*((uint32_t)1<<16));
 	//dbg_print(0, "freq_word=%04lX\n", freq_word);
 
 	if(trx==CHIP_RX)
@@ -544,6 +542,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		{
 			interface_comm=COMM_TOT; //set the TOT flag
 		}
+	}
+
+	//24kHz baseband timer - workaround
+	else if(tim==TIM7)
+	{
+		bsb_rx_pend=1;
 	}
 }
 
@@ -856,12 +860,17 @@ int main(void)
 		  				  uint8_t header[2]={0x2F|0xC0, 0x7D}; //CFM_RX_DATA_OUT, burst access
 		  				  set_CS(CHIP_RX, 0); //CS low
 		  				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
-		  				  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external read baseband sample trigger
+		  				  //for some reason, the external signal runs at 75.7582kHz instead of expected 24kHz
+		  				  //HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external read baseband sample trigger
+		  				  FIX_TIMER_TRIGGER(&htim7);
+		  				  TIM7->CNT=0;
+		  				  HAL_TIM_Base_Start_IT(&htim7);
 		  			  }
 		  		  }
 		  		  else //stop
 		  		  {
-		  			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external read baseband sample trigger signal
+		  			  //HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external read baseband sample trigger signal
+		  			  HAL_TIM_Base_Stop_IT(&htim7);
 		  			  set_CS(CHIP_RX, 1); //CS high
 		  			  rx_state=RX_IDLE;
 		  			  interface_resp(CMD_SET_RX, 0); //OK
@@ -894,6 +903,13 @@ int main(void)
 		  		  memcpy(&resp[2], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
 		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
 			  break;
+
+		  	  /*case 0x88:
+		  		  resp[0]=trx_readreg(CHIP_RX, 0x0013);
+		  		  resp[1]=trx_readreg(CHIP_RX, 0x0014);
+		  		  resp[2]=trx_readreg(CHIP_RX, 0x0015);
+		  		  HAL_UART_Transmit_IT(&huart1, resp, 3);
+			  break;*/
 
 		  	  default:
 		  		  ;
@@ -1360,6 +1376,7 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
   HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //immediately disable it, as we don't need it right away
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
