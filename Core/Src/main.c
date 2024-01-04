@@ -479,7 +479,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		cc1200_rx_settings[33*3-1]=(freq_word>>8)&0xFF;
 		cc1200_rx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_rx_settings);
-		trx_writereg(trx, 0x0000, 29);		//IOCFG3, GPIO3 - CLKEN_CFM
+		trx_writereg(trx, 0x0001, 29);		//IOCFG2, GPIO2 - CLKEN_CFM
 	}
 	else if(trx==CHIP_TX)
 	{
@@ -491,7 +491,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		cc1200_tx_settings[33*3-1]=(freq_word>>8)&0xFF;
 		cc1200_tx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_tx_settings);
-		trx_writereg(trx, 0x0000, 30);		//IOCFG3, GPIO3 - CFM_TX_DATA_CLK
+		trx_writereg(trx, 0x0001, 30);		//IOCFG2, GPIO2 - CFM_TX_DATA_CLK
 	}
 
 	//frequency correction
@@ -553,10 +553,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	{
 		bsb_tx_pend=1;
 	}
-	/*else if(GPIO_Pin==RX_TRIG_Pin)
+	else if(GPIO_Pin==RX_TRIG_Pin)
 	{
 		bsb_rx_pend=1;
-	}*/
+	}
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -840,7 +840,7 @@ int main(void)
 		  			uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
 		  			set_CS(CHIP_TX, 0); //CS low
 		  			HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
-		  			HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external baseband sample trigger signal
+		  			HAL_NVIC_EnableIRQ(EXTI9_5_IRQn); //enable external baseband sample trigger signal
 		  			//set_TP(TP2, 1); //debug
 		  		  }
 			  break;
@@ -855,12 +855,12 @@ int main(void)
 		  				  uint8_t header[2]={0x2F|0xC0, 0x7D}; //CFM_RX_DATA_OUT, burst access
 		  				  set_CS(CHIP_RX, 0); //CS low
 		  				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
-		  				  //HAL_NVIC_EnableIRQ(); //enable external read baseband sample trigger
+		  				  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external read baseband sample trigger
 		  			  }
 		  		  }
 		  		  else //stop
 		  		  {
-		  			  //HAL_NVIC_DisableIRQ(); //disable external read baseband sample trigger signal
+		  			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external read baseband sample trigger signal
 		  			  set_CS(CHIP_RX, 1); //CS high
 		  			  rx_state=RX_IDLE;
 		  			  interface_resp(CMD_SET_RX, 0); //OK
@@ -910,7 +910,7 @@ int main(void)
 		  //nothing else to transmit
 		  if(tx_bsb_cnt==tx_bsb_total_cnt)
 		  {
-			  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external baseband sample trigger signal
+			  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //disable external baseband sample trigger signal
 			  trx_data[CHIP_TX].pwr=3; //set it back to low power
 			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 			  set_rf_pwr_setpoint(0);
@@ -934,6 +934,7 @@ int main(void)
 		  //fetch baseband sample
 		  rx_bsb_sample=trx_readreg(CHIP_RX, 0x2F7D);
 		  HAL_UART_Transmit_IT(&huart1, (uint8_t*)&rx_bsb_sample, 1);
+		  bsb_rx_pend=0;
 	  }
     /* USER CODE END WHILE */
 
@@ -1329,13 +1330,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : TX_TRIG_Pin */
-  GPIO_InitStruct.Pin = TX_TRIG_Pin;
+  /*Configure GPIO pins : TX_TRIG_Pin RX_TRIG_Pin */
+  GPIO_InitStruct.Pin = TX_TRIG_Pin|RX_TRIG_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(TX_TRIG_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
