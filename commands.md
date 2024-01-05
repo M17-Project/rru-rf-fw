@@ -1,4 +1,4 @@
-## RRU/dv_link commands
+## rpi-interface Command Set
 
 ### Command format
 
