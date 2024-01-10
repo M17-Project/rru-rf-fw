@@ -54,4 +54,10 @@ enum interface_comm_t
 	COMM_OVF
 };
 
+enum err_t
+{
+	ERR_OK,					//all good
+	ERR_PLL_SPI				//TRX PLL or SPI bus error
+};
+
 #endif /* INC_ENUMS_H_ */

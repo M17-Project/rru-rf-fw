@@ -65,6 +65,8 @@ UART_HandleTypeDef huart3;
 /* USER CODE BEGIN PV */
 #include "enums.h"
 
+enum err_t dev_err=ERR_OK;	//default state - no error
+
 struct trx_data_t
 {
 	uint8_t name[20];		//chip's name (CC1200, CC1201, unknown ID)
@@ -580,7 +582,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 				return;
 			}
 
-			//handle overflow
+			//handle normal comm conditions and overflow
 			if(rx_bc<sizeof(rxb)) //all normal - proceed
 			{
 				rx_bc++;
@@ -693,7 +695,7 @@ int main(void)
   if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
   {
 	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock or SPI error occurred\nHalting\n");
-	  while(1);
+	  dev_err=ERR_PLL_SPI;
   }
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
@@ -761,7 +763,7 @@ int main(void)
 		  switch(rxb[0])
 		  {
 		  	  case CMD_PING:
-		  		  interface_resp(CMD_PING, 0); //OK
+		  		  interface_resp(CMD_PING, dev_err); //OK or error code
 		  	  break;
 
 		  	  case CMD_SET_RX_FREQ:
@@ -823,7 +825,7 @@ int main(void)
 			  break;
 
 		  	  case CMD_SET_TX_START:
-		  		  if(tx_state==TX_IDLE)
+		  		  if(tx_state==TX_IDLE && dev_err==ERR_OK)
 		  		  {
 		  			tx_state=TX_ACTIVE;
 		  			trx_data[CHIP_TX].pwr=63;
@@ -848,12 +850,16 @@ int main(void)
 		  			HAL_NVIC_EnableIRQ(EXTI9_5_IRQn); //enable external baseband sample trigger signal
 		  			//set_TP(TP2, 1); //debug
 		  		  }
+		  		  else
+		  		  {
+		  			  interface_resp(CMD_SET_TX_START, dev_err);
+		  		  }
 			  break;
 
 		  	  case CMD_SET_RX:
 		  		  if(rxb[2]) //start
 		  		  {
-		  			  if(rx_state==RX_IDLE)
+		  			  if(rx_state==RX_IDLE && dev_err==ERR_OK)
 		  			  {
 		  				  rx_state=RX_ACTIVE;
 		  				  //initiate baseband SPI transfer from the receiver
@@ -865,6 +871,10 @@ int main(void)
 		  				  FIX_TIMER_TRIGGER(&htim7);
 		  				  TIM7->CNT=0;
 		  				  HAL_TIM_Base_Start_IT(&htim7);
+		  			  }
+		  			  else
+		  			  {
+		  				  interface_resp(CMD_SET_RX, dev_err);
 		  			  }
 		  		  }
 		  		  else //stop
