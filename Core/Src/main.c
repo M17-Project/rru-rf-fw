@@ -694,7 +694,7 @@ int main(void)
 
   if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
   {
-	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock or SPI error occurred\nHalting\n");
+	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock or SPI bus error occurred\nHalting\n");
 	  dev_err=ERR_PLL_SPI;
   }
 
