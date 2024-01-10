@@ -683,16 +683,16 @@ int main(void)
   trx_writecmd(CHIP_TX, STR_STX);
 
   HAL_Delay(50);
-  trx_data[CHIP_RX].pll_locked = (trx_readreg(CHIP_RX, 0x2F8D)^0x80)&0x81; //FSCAL_CTRL=1 and FSCAL_CTRL_NOT_USED=0
-  trx_data[CHIP_TX].pll_locked = (trx_readreg(CHIP_TX, 0x2F8D)^0x80)&0x81;
+  trx_data[CHIP_RX].pll_locked = ((trx_readreg(CHIP_RX, 0x2F8D)^0x80)&0x81)==0x81; //FSCAL_CTRL=1 and FSCAL_CTRL_NOT_USED=0
+  trx_data[CHIP_TX].pll_locked = ((trx_readreg(CHIP_TX, 0x2F8D)^0x80)&0x81)==0x81;
   dbg_print(0, "RX PLL");
-  trx_data[CHIP_RX].pll_locked==0x81 ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+  trx_data[CHIP_RX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
   dbg_print(0, "TX PLL");
-  trx_data[CHIP_TX].pll_locked==0x81 ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+  trx_data[CHIP_TX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
 
-  if(trx_data[CHIP_RX].pll_locked!=0x81 || trx_data[CHIP_TX].pll_locked!=0x81)
+  if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
   {
-	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock\nHalting\n");
+	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock or SPI error occurred\nHalting\n");
 	  while(1);
   }
 
