@@ -67,7 +67,7 @@ UART_HandleTypeDef huart3;
 
 struct trx_data_t
 {
-	uint8_t name[8];		//chip's name (CC1200, CC1201, unknown)
+	uint8_t name[20];		//chip's name (CC1200, CC1201, unknown ID)
 	uint32_t frequency;		//frequency in hertz
 	uint8_t pwr;			//power setting (3..63)
 	int16_t fcorr;			//frequency correction
@@ -330,14 +330,14 @@ void detect_ic(uint8_t* rx, uint8_t* tx)
 	else if(rxid==0x21)
 		sprintf((char*)rx, "CC1201");
 	else
-		sprintf((char*)rx, "unknown");
+		sprintf((char*)rx, "unknown ID (0x%02X)", rxid);
 
 	if(txid==0x20)
 		sprintf((char*)tx, "CC1200");
 	else if(txid==0x21)
 		sprintf((char*)tx, "CC1201");
 	else
-		sprintf((char*)tx, "unknown");
+		sprintf((char*)tx, "unknown ID (0x%02X)", txid);
 }
 
 void config_ic(enum trx_t trx, uint8_t* settings)
@@ -683,14 +683,14 @@ int main(void)
   trx_writecmd(CHIP_TX, STR_STX);
 
   HAL_Delay(50);
-  trx_data[CHIP_RX].pll_locked = trx_readreg(CHIP_RX, 0x2F8D)%2; //FSCAL_CTRL
-  trx_data[CHIP_TX].pll_locked = trx_readreg(CHIP_TX, 0x2F8D)%2;
+  trx_data[CHIP_RX].pll_locked = (trx_readreg(CHIP_RX, 0x2F8D)^0x80)&0x81; //FSCAL_CTRL=1 and FSCAL_CTRL_NOT_USED=0
+  trx_data[CHIP_TX].pll_locked = (trx_readreg(CHIP_TX, 0x2F8D)^0x80)&0x81;
   dbg_print(0, "RX PLL");
-  trx_data[CHIP_RX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+  trx_data[CHIP_RX].pll_locked==0x81 ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
   dbg_print(0, "TX PLL");
-  trx_data[CHIP_TX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+  trx_data[CHIP_TX].pll_locked==0x81 ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
 
-  if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
+  if(trx_data[CHIP_RX].pll_locked!=0x81 || trx_data[CHIP_TX].pll_locked!=0x81)
   {
 	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock\nHalting\n");
 	  while(1);
