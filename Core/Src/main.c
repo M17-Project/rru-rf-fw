@@ -694,7 +694,7 @@ int main(void)
 
   if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
   {
-	  dbg_print(TERM_RED, "ERROR: At least one PLL didn't lock or SPI bus error occurred\nHalting\n");
+	  dbg_print(TERM_RED, "ERROR %d: At least one PLL didn't lock or SPI bus error occurred\n", ERR_PLL_SPI);
 	  dev_err=ERR_PLL_SPI;
   }
 
@@ -754,7 +754,7 @@ int main(void)
 		  interface_comm=COMM_IDLE;
 		  set_TP(TP1, 0);
 
-		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[2], rxb[1]);
+		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[0], rxb[1]);
 
 		  uint32_t freq;
 		  uint8_t ident[128]={0};
@@ -832,7 +832,7 @@ int main(void)
 		  			trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 		  			set_rf_pwr_setpoint(alc_set);
 		  			rf_pa_en(1);
-		  			dbg_print(0, "TX -> start\n");
+		  			dbg_print(0, "[INTRFC_CMD] TX -> start\n");
 
 		  			//stop UART timeout timer
 		  			HAL_TIM_Base_Stop_IT(&htim6);
@@ -859,8 +859,9 @@ int main(void)
 		  	  case CMD_SET_RX:
 		  		  if(rxb[2]) //start
 		  		  {
-		  			  if(rx_state==RX_IDLE && dev_err==ERR_OK)
+		  			  if(rx_state==RX_IDLE)// && dev_err==ERR_OK)
 		  			  {
+		  				  dbg_print(0, "[INTRFC_CMD] RX start\n");
 		  				  rx_state=RX_ACTIVE;
 		  				  //initiate baseband SPI transfer from the receiver
 		  				  uint8_t header[2]={0x2F|0xC0, 0x7D}; //CFM_RX_DATA_OUT, burst access
@@ -884,6 +885,7 @@ int main(void)
 		  			  set_CS(CHIP_RX, 1); //CS high
 		  			  rx_state=RX_IDLE;
 		  			  interface_resp(CMD_SET_RX, 0); //OK
+		  			  dbg_print(0, "[INTRFC_CMD] RX stop\n");
 		  		  }
 			  break;
 
@@ -961,7 +963,7 @@ int main(void)
 			  tx_bsb_cnt=0;
 			  tx_bsb_total_cnt=0;
 			  //set_TP(TP2, 0); //debug
-			  dbg_print(0, "TX -> end\n");
+			  dbg_print(0, "[SELF] TX -> end\n");
 		  }
 
 		  bsb_tx_pend=0;
