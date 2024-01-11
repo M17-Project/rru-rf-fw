@@ -377,7 +377,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x13, 0x43, //symbol rate 2 - 1.5k sym/s
 		0x00, 0x14, 0xA9, //symbol rate 1
 		0x00, 0x15, 0x2A, //symbol rate 0
-		0x00, 0x16, 0x37,
+		0x00, 0x16, 0x37, //AGC_REF - AGC Reference Level Configuration
 		0x00, 0x17, 0xEC,
 		0x00, 0x19, 0x11,
 		0x00, 0x1B, 0x51,
@@ -822,6 +822,21 @@ int main(void)
 		  		  config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
 		  		  dbg_print(0, "[INTRFC_CMD] Frequency correction: %d\n", *((int16_t*)&rxb[2]));
 		  		  interface_resp(CMD_SET_TX_POWER, 0); //OK
+			  break;
+
+		  	  case CMD_SET_AFC:
+		  		  dbg_print(0, "[INTRFC_CMD] RX AFC");
+		  		  if(rxb[2])
+		  		  {
+		  			  trx_writereg(CHIP_RX, 0x2F01, 0x22);
+		  			  dbg_print(TERM_GREEN, " enabled\n");
+		  		  }
+		  		  else
+		  		  {
+		  			  trx_writereg(CHIP_RX, 0x2F01, 0x02);
+		  			  dbg_print(TERM_GREEN, " disabled\n");
+		  		  }
+		  		  interface_resp(CMD_SET_AFC, 0); //OK
 			  break;
 
 		  	  case CMD_SET_TX_START:

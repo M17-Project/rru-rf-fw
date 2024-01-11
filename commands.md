@@ -8,25 +8,25 @@
 
 ### Command list
 
-| Command | Byte count | Action                            | Parameters                | Return value            |
-|---------|------------|-----------------------------------|---------------------------|-------------------------|
-| 0x00    | 2          | Ping                              | -                         | 0/1                     |
-| 0x01    | 6          | Set RX frequency                  | 32-bit frequency in Hz    | 0/1                     |
-| 0x02    | 6          | Set TX frequency                  | 32-bit frequency in Hz    | 0/1                     |
-| 0x03    | 3          | Set TX power                      | 8-bit value, unsigned[1]  | 0/1                     |
-| 0x04    | -          | Reserved                          | -                         | -                       |
-| 0x05    | 4          | Set frequency correction          | 16-bit value, signed[2]   | 0/1                     |
-| 0x06    | 2          | Automatic Frequency Control (AFC) | 0/1                       | 0/1                     |
-| 0x07    | 2          | Transmission start                | -                         | -                       |
-| 0x08    | 3          | Reception stop/start              | 0/1                       | 0/1 at RX end only      |
-| ...     | ...        | ...                               | ...                       | ...                     |
-| 0x80    | 2          | Get IDENT string                  | -                         | IDENT string            |
-| 0x81    | 2          | Get device's capabilities         | -                         | 8-bit value             |
-| 0x82    | 2          | Get RX frequency                  | -                         | 32-bit frequency in Hz  |
-| 0x83    | 2          | Get TX frequency                  | -                         | 32-bit frequency in Hz  |
-| 0x84    | 2          | Get TX power                      | -                         | 8-bit value, signed[1]  |
-| 0x85    | 2          | Get frequency correction          | -                         | 16-bit value, signed    |
-| ...     | ...        | ...                               | ...                       | ...                     |
+| Command | Byte count | Action                                | Parameters                | Return value            |
+|---------|------------|---------------------------------------|---------------------------|-------------------------|
+| 0x00    | 2          | Ping                                  | -                         | 0/1                     |
+| 0x01    | 6          | Set RX frequency                      | 32-bit frequency in Hz    | 0/1                     |
+| 0x02    | 6          | Set TX frequency                      | 32-bit frequency in Hz    | 0/1                     |
+| 0x03    | 3          | Set TX power                          | 8-bit value, unsigned[1]  | 0/1                     |
+| 0x04    | -          | Reserved                              | -                         | -                       |
+| 0x05    | 4          | Set frequency correction              | 16-bit value, signed[2]   | 0/1                     |
+| 0x06    | 3          | Set Automatic Frequency Control (AFC) | 0/1                       | 0/1                     |
+| 0x07    | 2          | Transmission start                    | -                         | -                       |
+| 0x08    | 3          | Reception stop/start                  | 0/1                       | 0/1 at RX end only      |
+| ...     | ...        | ...                                   | ...                       | ...                     |
+| 0x80    | 2          | Get IDENT string                      | -                         | IDENT string            |
+| 0x81    | 2          | Get device's capabilities             | -                         | 8-bit value             |
+| 0x82    | 2          | Get RX frequency                      | -                         | 32-bit frequency in Hz  |
+| 0x83    | 2          | Get TX frequency                      | -                         | 32-bit frequency in Hz  |
+| 0x84    | 2          | Get TX power                          | -                         | 8-bit value, signed[1]  |
+| 0x85    | 2          | Get frequency correction              | -                         | 16-bit value, signed    |
+| ...     | ...        | ...                                   | ...                       | ...                     |
 
 All values are little-endian. Return value of 0 means success, any other value is an error code.
 Parameter of 0 disables the function, 1 enables it.
