@@ -763,6 +763,7 @@ int main(void)
 		  switch(rxb[0])
 		  {
 		  	  case CMD_PING:
+		  		  dbg_print(0, "[INTRFC_CMD] PING\n");
 		  		  interface_resp(CMD_PING, dev_err); //OK or error code
 		  	  break;
 
@@ -905,6 +906,7 @@ int main(void)
 			  break;
 
 		  	  case CMD_GET_IDENT:
+		  		  dbg_print(0, "[INTRFC_CMD] GET_IDENT\n");
 				  //reply with RRU's IDENT string
 				  sprintf((char*)&ident[2], IDENT_STR);
 				  ident[0]=0x80; //a reply to "Get IDENT string" command
