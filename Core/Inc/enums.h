@@ -57,7 +57,19 @@ enum interface_comm_t
 enum err_t
 {
 	ERR_OK,					//all good
-	ERR_PLL_SPI				//TRX PLL or SPI bus error
+	ERR_RX_PLL,				//RX PLL lock error
+	ERR_TX_PLL,				//TX PLL lock error
+	ERR_RX_SPI,				//RX SPI comms error
+	ERR_TX_SPI				//TX SPI comms error
+};
+
+const char *errstrings[5]=
+{
+	"OK",
+	"RX PLL did not lock",
+	"TX PLL did not lock",
+	"RX SPI communication error",
+	"TX SPI communication error"
 };
 
 #endif /* INC_ENUMS_H_ */

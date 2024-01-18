@@ -65,7 +65,7 @@ UART_HandleTypeDef huart3;
 /* USER CODE BEGIN PV */
 #include "enums.h"
 
-enum err_t dev_err=ERR_OK;	//default state - no error
+uint32_t dev_err=(uint32_t)ERR_OK;	//default state - no error
 
 struct trx_data_t
 {
@@ -692,10 +692,25 @@ int main(void)
   dbg_print(0, "TX PLL");
   trx_data[CHIP_TX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
 
-  if(!trx_data[CHIP_RX].pll_locked || !trx_data[CHIP_TX].pll_locked)
+  if(!trx_data[CHIP_RX].pll_locked)
   {
-	  dbg_print(TERM_RED, "ERROR %d: At least one PLL didn't lock or SPI bus error occurred\n", ERR_PLL_SPI);
-	  dev_err=ERR_PLL_SPI;
+	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_RX_PLL, errstrings[ERR_RX_PLL]);
+	  dev_err|=(1UL<<ERR_RX_PLL);
+  }
+  if(!trx_data[CHIP_TX].pll_locked)
+  {
+	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_PLL, errstrings[ERR_TX_PLL]);
+	  dev_err|=(1UL<<ERR_TX_PLL);
+  }
+  if(strstr((char*)trx_data[CHIP_RX].name, "unknown")!=NULL)
+  {
+  	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_RX_SPI, errstrings[ERR_RX_SPI]);
+  	  dev_err|=(1UL<<ERR_RX_SPI);
+  }
+  if(strstr((char*)trx_data[CHIP_TX].name, "unknown")!=NULL)
+  {
+  	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_SPI, errstrings[ERR_TX_SPI]);
+  	  dev_err|=(1UL<<ERR_TX_SPI);
   }
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
