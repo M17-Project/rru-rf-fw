@@ -779,7 +779,10 @@ int main(void)
 		  {
 		  	  case CMD_PING:
 		  		  dbg_print(0, "[INTRFC_CMD] PING\n");
-		  		  interface_resp(CMD_PING, dev_err); //OK or error code
+		  		  resp[0]=CMD_PING;
+		  		  resp[1]=6;
+		  		  memcpy(&resp[2], (uint8_t*)&dev_err, sizeof(uint32_t));
+		  		  HAL_UART_Transmit_IT(&huart1, resp, 6); //error code, 0 for OK
 		  	  break;
 
 		  	  case CMD_SET_RX_FREQ:
