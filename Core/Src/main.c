@@ -934,7 +934,7 @@ int main(void)
 
 		  	  case CMD_GET_CAPS:
 				  //so far the RRU can do FM only, duplex
-				  interface_resp(CMD_SET_TX_POWER, 0x82);
+				  interface_resp(CMD_GET_CAPS, 0x82);
 			  break;
 
 		  	  case CMD_GET_RX_FREQ:
