@@ -878,9 +878,7 @@ int main(void)
 		  			tx_bsb_total_cnt=BSB_RUNUP;
 
 		  			//initiate baseband SPI transfer to the transmitter
-		  			uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
-		  			set_CS(CHIP_TX, 0); //CS low
-		  			HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
+		  			//burst access is impossible due to shared SPI bus
 		  			HAL_NVIC_EnableIRQ(EXTI9_5_IRQn); //enable external baseband sample trigger signal
 		  			//set_TP(TP2, 1); //debug
 		  		  }
@@ -898,9 +896,7 @@ int main(void)
 		  				  dbg_print(0, "[INTRFC_CMD] RX start\n");
 		  				  rx_state=RX_ACTIVE;
 		  				  //initiate baseband SPI transfer from the receiver
-		  				  uint8_t header[2]={0x2F|0xC0, 0x7D}; //CFM_RX_DATA_OUT, burst access
-		  				  set_CS(CHIP_RX, 0); //CS low
-		  				  HAL_SPI_Transmit(&hspi1, header, 2, 10); //send 2-byte header
+		  				  //burst access is impossible due to shared SPI bus
 		  				  //for some reason, the external signal runs at 75.7582kHz instead of expected 24kHz
 		  				  //HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external read baseband sample trigger
 		  				  FIX_TIMER_TRIGGER(&htim7);
@@ -916,7 +912,6 @@ int main(void)
 		  		  {
 		  			  //HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external read baseband sample trigger signal
 		  			  HAL_TIM_Base_Stop_IT(&htim7);
-		  			  set_CS(CHIP_RX, 1); //CS high
 		  			  rx_state=RX_IDLE;
 		  			  interface_resp(CMD_SET_RX, 0); //OK
 		  			  dbg_print(0, "[INTRFC_CMD] RX stop\n");
@@ -978,7 +973,7 @@ int main(void)
 		  set_TP(TP2, 1);
 
 		  //send baseband sample ASAP
-		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&tx_bsb_sample, 1, 2);
+		  trx_writereg(CHIP_TX, 0x2F7E, (uint8_t)tx_bsb_sample); //write single byte
 		  //set_dac_ch2(bsb_sample*31+2048); //debug - check how the signal looks like
 
 		  //fetch another sample
@@ -993,7 +988,6 @@ int main(void)
 			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 			  set_rf_pwr_setpoint(0);
 			  rf_pa_en(0);
-			  set_CS(CHIP_TX, 1); //CS high
 			  tx_state=TX_IDLE;
 			  tx_bsb_cnt=0;
 			  tx_bsb_total_cnt=0;
