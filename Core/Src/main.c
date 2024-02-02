@@ -39,8 +39,8 @@
 #define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
-#define BSB_BUFLEN		4800					//tx/rx buffer size in samples (200ms at fs=24kHz)
-#define BSB_RUNUP		2880					//120ms worth of baseband data (at 24kHz)
+#define BSB_BUFLEN		4800UL					//tx/rx buffer size in samples (200ms at fs=24kHz)
+#define BSB_RUNUP		2880UL					//120ms worth of baseband data (at 24kHz)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -83,8 +83,8 @@ float tx_dbm=0.0f;											//RF power setpoint, dBm
 //buffers and interface stuff
 volatile uint8_t rxb[100]={0};								//rx buffer for interface data
 volatile uint8_t rx_bc=0;									//UART1 rx byte counter
-int8_t tx_bsb_buff[BSB_BUFLEN]={0};							//buffer for transmission
-uint32_t tx_bsb_total_cnt=0;								//how many samples were received
+volatile int8_t tx_bsb_buff[BSB_BUFLEN]={0};				//buffer for transmission
+volatile uint32_t tx_bsb_total_cnt=0;						//how many samples were received
 uint32_t tx_bsb_cnt=0;										//how many samples were transmitted
 int8_t tx_bsb_sample=0;										//current tx sample
 int8_t rx_bsb_sample=0;										//current rx sample
