@@ -39,8 +39,8 @@
 #define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
-#define BSB_BUFLEN		4800UL					//tx/rx buffer size in samples (200ms at fs=24kHz)
-#define BSB_RUNUP		2880UL					//120ms worth of baseband data (at 24kHz)
+#define BSB_BUFLEN		5760ULL					//tx/rx buffer size in samples (240ms at fs=24kHz)
+#define BSB_RUNUP		960ULL					//40ms worth of baseband data (at 24kHz)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -600,7 +600,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		else
 		{
 			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
-			tx_bsb_buff[(BSB_RUNUP+tx_bsb_total_cnt)%BSB_BUFLEN]=rxb[0];
+			tx_bsb_buff[tx_bsb_total_cnt%BSB_BUFLEN]=rxb[0];
 			tx_bsb_total_cnt++;
 		}
 	}
@@ -871,7 +871,6 @@ int main(void)
 		  			//stop UART timeout timer
 		  			HAL_TIM_Base_Stop_IT(&htim6);
 		  			HAL_UART_AbortReceive_IT(&huart1);
-		  			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 
 		  			//fill the run-up
 		  			memset((uint8_t*)tx_bsb_buff, 0, BSB_RUNUP);
@@ -879,6 +878,7 @@ int main(void)
 
 		  			//initiate baseband SPI transfer to the transmitter
 		  			//burst access is impossible due to shared SPI bus
+		  			HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 		  			HAL_NVIC_EnableIRQ(EXTI9_5_IRQn); //enable external baseband sample trigger signal
 		  			//set_TP(TP2, 1); //debug
 		  		  }
@@ -897,8 +897,7 @@ int main(void)
 		  				  rx_state=RX_ACTIVE;
 		  				  //initiate baseband SPI transfer from the receiver
 		  				  //burst access is impossible due to shared SPI bus
-		  				  //for some reason, the external signal runs at 75.7582kHz instead of expected 24kHz
-		  				  //HAL_NVIC_EnableIRQ(EXTI15_10_IRQn); //enable external read baseband sample trigger
+		  				  //for some reason, the external signal runs at ~37.9kHz instead of expected 24kHz
 		  				  FIX_TIMER_TRIGGER(&htim7);
 		  				  TIM7->CNT=0;
 		  				  HAL_TIM_Base_Start_IT(&htim7);
@@ -910,8 +909,7 @@ int main(void)
 		  		  }
 		  		  else //stop
 		  		  {
-		  			  //HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //disable external read baseband sample trigger signal
-		  			  HAL_TIM_Base_Stop_IT(&htim7);
+		  			  HAL_TIM_Base_Stop_IT(&htim7); //disable read baseband sample trigger signal
 		  			  rx_state=RX_IDLE;
 		  			  interface_resp(CMD_SET_RX, 0); //OK
 		  			  dbg_print(0, "[INTRFC_CMD] RX stop\n");
@@ -981,7 +979,7 @@ int main(void)
 		  tx_bsb_cnt++;
 
 		  //nothing else to transmit
-		  if(tx_bsb_cnt==tx_bsb_total_cnt)
+		  if(tx_bsb_cnt>=tx_bsb_total_cnt)
 		  {
 			  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //disable external baseband sample trigger signal
 			  trx_data[CHIP_TX].pwr=3; //set it back to low power
@@ -991,6 +989,7 @@ int main(void)
 			  tx_state=TX_IDLE;
 			  tx_bsb_cnt=0;
 			  tx_bsb_total_cnt=0;
+			  tx_bsb_sample=0;
 			  //set_TP(TP2, 0); //debug
 			  dbg_print(0, "[SELF] TX -> end\n");
 		  }
