@@ -866,7 +866,7 @@ int main(void)
 		  			trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 		  			set_rf_pwr_setpoint(alc_set);
 		  			rf_pa_en(1);
-		  			dbg_print(0, "[INTRFC_CMD] TX -> start\n");
+		  			//dbg_print(0, "[INTRFC_CMD] TX -> start\n"); //takes time!
 
 		  			//stop UART timeout timer
 		  			HAL_TIM_Base_Stop_IT(&htim6);
@@ -990,8 +990,8 @@ int main(void)
 			  tx_bsb_cnt=0;
 			  tx_bsb_total_cnt=0;
 			  tx_bsb_sample=0;
+			  //dbg_print(0, "[SELF] TX -> end\n"); //takes time!
 			  //set_TP(TP2, 0); //debug
-			  dbg_print(0, "[SELF] TX -> end\n");
 		  }
 
 		  bsb_tx_pend=0;
