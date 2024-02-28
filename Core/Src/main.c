@@ -559,10 +559,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	{
 		bsb_tx_pend=1;
 	}
-	else if(GPIO_Pin==RX_TRIG_Pin)
+	/*else if(GPIO_Pin==RX_TRIG_Pin)
 	{
 		bsb_rx_pend=1;
-	}
+	}*/
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -972,7 +972,7 @@ int main(void)
 
 		  //send baseband sample ASAP
 		  trx_writereg(CHIP_TX, 0x2F7E, (uint8_t)tx_bsb_sample); //write single byte
-		  //set_dac_ch2(bsb_sample*31+2048); //debug - check how the signal looks like
+		  //set_dac_ch2(tx_bsb_sample*31+2048); //debug - check how the signal looks like
 
 		  //fetch another sample
 		  tx_bsb_sample=tx_bsb_buff[tx_bsb_cnt%BSB_BUFLEN];
