@@ -671,7 +671,7 @@ int main(void)
   trx_data[CHIP_RX].frequency=433475000;				//default
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=0;	//shared clock source, thus the same corr
-  trx_data[CHIP_TX].pwr=3;								//3 to 63
+  trx_data[CHIP_TX].pwr=63;								//3 to 63
   tx_dbm=30.00f;										//30dBm (1W) default
   alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
 
@@ -757,9 +757,27 @@ int main(void)
 	  uint8_t val=trx_readreg(CHIP_RX, 0x2F7D);
 	  //HAL_UART_Transmit(&huart3, &val, 1, 10);
 	  set_dac_ch2((int8_t)val*31+2048);
+  }
+
+  while(0) //CC1200 TX output test
+  {
+	  set_rf_pwr_setpoint(0);
+	  rf_pa_en(0);
+
+	  while(1)
+	  {
+		  trx_data[CHIP_TX].pwr=63;
+		  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  trx_writecmd(CHIP_TX, STR_STX);
+		  HAL_Delay(1000);
+		  //trx_data[CHIP_TX].pwr=3;
+		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  trx_writecmd(CHIP_TX, STR_IDLE);
+		  HAL_Delay(1000);
+	  }
   }*/
 
-  while(1) //interface test
+  while(1)
   {
 	  if(interface_comm==COMM_RDY) //if a valid interface frame is detected
 	  {
@@ -862,8 +880,8 @@ int main(void)
 		  		  if(tx_state==TX_IDLE && dev_err==ERR_OK)
 		  		  {
 		  			tx_state=TX_ACTIVE;
-		  			trx_data[CHIP_TX].pwr=63;
-		  			trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  			//trx_data[CHIP_TX].pwr=63;
+		  			//trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 		  			set_rf_pwr_setpoint(alc_set);
 		  			rf_pa_en(1);
 		  			//dbg_print(0, "[INTRFC_CMD] TX -> start\n"); //takes time!
@@ -944,12 +962,9 @@ int main(void)
 		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
 			  break;
 
-		  	  /*case 0x88:
-		  		  resp[0]=trx_readreg(CHIP_RX, 0x0013);
-		  		  resp[1]=trx_readreg(CHIP_RX, 0x0014);
-		  		  resp[2]=trx_readreg(CHIP_RX, 0x0015);
-		  		  HAL_UART_Transmit_IT(&huart1, resp, 3);
-			  break;*/
+		  	  case 0x0A:
+		  		set_rf_pwr_setpoint(0);
+			  break;
 
 		  	  default:
 		  		  ;
@@ -968,7 +983,7 @@ int main(void)
 	  if(bsb_tx_pend==1)
 	  {
 		  //debug
-		  set_TP(TP2, 1);
+		  //set_TP(TP2, 1);
 
 		  //send baseband sample ASAP
 		  trx_writereg(CHIP_TX, 0x2F7E, (uint8_t)tx_bsb_sample); //write single byte
@@ -982,10 +997,14 @@ int main(void)
 		  if(tx_bsb_cnt>=tx_bsb_total_cnt)
 		  {
 			  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //disable external baseband sample trigger signal
-			  trx_data[CHIP_TX].pwr=3; //set it back to low power
-			  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+			  //trx_data[CHIP_TX].pwr=3; //set it back to low power
+			  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+			  set_TP(TP2, 1);
+			  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
 			  set_rf_pwr_setpoint(0);
+			  HAL_Delay(50);
 			  rf_pa_en(0);
+			  set_TP(TP2, 0);
 			  tx_state=TX_IDLE;
 			  tx_bsb_cnt=0;
 			  tx_bsb_total_cnt=0;
@@ -997,7 +1016,7 @@ int main(void)
 		  bsb_tx_pend=0;
 
 		  //debug
-		  set_TP(TP2, 0);
+		  //set_TP(TP2, 0);
 	  }
 
 	  if(bsb_rx_pend==1)
