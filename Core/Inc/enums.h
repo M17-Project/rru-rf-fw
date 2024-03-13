@@ -60,7 +60,21 @@ enum err_t
 	ERR_RX_PLL,				//RX PLL lock error
 	ERR_TX_PLL,				//TX PLL lock error
 	ERR_RX_SPI,				//RX SPI comms error
-	ERR_TX_SPI				//TX SPI comms error
+	ERR_TX_SPI,				//TX SPI comms error
+	ERR_RANGE				//value out of range
+};
+
+//internal TRX state, as per p. 8 of the datasheet
+enum int_state_t
+{
+	STATE_IDLE,
+	STATE_RX,
+	STATE_TX,
+	STATE_FSTXON,
+	STATE_CALIBRATE,
+	STATE_SETTLING,
+	STATE_RX_FIFO_ERR,
+	STATE_TX_FIFO_ERR
 };
 
 const char *errstrings[5]=

@@ -46,6 +46,7 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define FIX_TIMER_TRIGGER(handle_ptr) (__HAL_TIM_CLEAR_FLAG(handle_ptr, TIM_SR_UIF))
+#define DBG_HALT while(1)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -150,7 +151,7 @@ void dbg_print(const char* color_code, const char* fmt, ...)
 
 uint16_t dbm_to_alc(float dbm)
 {
-	return roundf(45.7617815165741f*dbm+917.06823976946f);
+	return roundf(43.8033381164565f*dbm+564.564609923722f);
 }
 
 //get RF power in dBm
@@ -391,7 +392,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x02, //AFC, 0x22 - on, 0x02 - off
-		0x2F, 0x04, 0x0C, //external oscillator's frequency is 40 MHz
+		0x2F, 0x04, 0x00, //ECG_CFG - External Clock Frequency Configuration - irrelevant
 		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
 		0x2F, 0x0C, 0x57, //frequency - round((float)435000000/5000000*(1<<16))=0x570000
 		0x2F, 0x0D, 0x00, //frequency
@@ -399,7 +400,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x2F, 0x10, 0xEE,
 		0x2F, 0x11, 0x10,
 		0x2F, 0x12, 0x07,
-		0x2F, 0x13, 0xAF,
+		0x2F, 0x13, 0xAF, //FS loop bandwidth - 500kHz RX/TX
 		0x2F, 0x16, 0x40,
 		0x2F, 0x17, 0x0E,
 		0x2F, 0x19, 0x03,
@@ -446,7 +447,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x00, 0x2E, 0xFF,
 		0x2F, 0x00, 0x1C,
 		0x2F, 0x01, 0x22,
-		0x2F, 0x04, 0x0C, //external oscillator's frequency is 40 MHz
+		0x2F, 0x04, 0x00, //ECG_CFG - External Clock Frequency Configuration - irrelevant
 		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
 		0x2F, 0x0C, 0x57, //frequency - round((float)435000000/5000000*(1<<16))=0x570000
 		0x2F, 0x0D, 0x00, //frequency
@@ -454,7 +455,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		0x2F, 0x10, 0xEE,
 		0x2F, 0x11, 0x10,
 		0x2F, 0x12, 0x07,
-		0x2F, 0x13, 0xAF,
+		0x2F, 0x13, 0xAF, //FS loop bandwidth - 500kHz RX/TX
 		0x2F, 0x16, 0x40,
 		0x2F, 0x17, 0x0E,
 		0x2F, 0x19, 0x03,
@@ -479,7 +480,7 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 		cc1200_rx_settings[33*3-1]=(freq_word>>8)&0xFF;
 		cc1200_rx_settings[34*3-1]=freq_word&0xFF;
 		config_ic(trx, cc1200_rx_settings);
-		trx_writereg(trx, 0x0001, 29);		//IOCFG2, GPIO2 - CLKEN_CFM
+		//trx_writereg(trx, 0x0001, 29);		//IOCFG2, GPIO2 - CLKEN_CFM
 	}
 	else if(trx==CHIP_TX)
 	{
@@ -498,7 +499,9 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 	trx_writereg(trx, 0x2F0A, (uint16_t)trx_data.fcorr>>8);
 	trx_writereg(trx, 0x2F0B, (uint16_t)trx_data.fcorr&0xFF);
 	//disable address autoincrement in burst mode (default - enabled)
-	trx_writereg(trx, 0x2F06, 0);
+	//trx_writereg(trx, 0x2F06, 0);
+	//KVCO high resolution enable
+	trx_writereg(trx, 0x2F14, 1<<6);
 }
 
 float m17_map_symbol(uint8_t dibit)
@@ -559,10 +562,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	{
 		bsb_tx_pend=1;
 	}
-	/*else if(GPIO_Pin==RX_TRIG_Pin)
-	{
-		bsb_rx_pend=1;
-	}*/
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -660,7 +659,7 @@ int main(void)
 
   HAL_Delay(100);
   trx_writecmd(CHIP_RX, STR_SRES);
-  trx_writecmd(CHIP_TX, STR_SRES);
+  trx_writecmd(CHIP_TX, STR_IDLE);
   dbg_print(0, TERM_CLR); //clear console and print out ident string
   dbg_print(TERM_GREEN, IDENT_STR); dbg_print(0,  "\n");
 
@@ -743,6 +742,39 @@ int main(void)
 		  dbg_print(0, "FWD=--.-dBm REF=--.-fdBm SWR=--.- T=%3.1f\n", temp);
   }
 
+  while(0) //PA test 2
+  {
+	  trx_writecmd(CHIP_TX, STR_IDLE);
+	  HAL_Delay(10);
+	  trx_data[CHIP_TX].frequency=438812500;
+	  //trx_data[CHIP_TX].pwr=63;
+	  config_rf(CHIP_TX, trx_data[CHIP_TX]);
+	  HAL_Delay(10);
+	  trx_writecmd(CHIP_TX, STR_STX);
+	  //set_rf_pwr_setpoint(1200); //14.35dBm
+	  //set_rf_pwr_setpoint(1500); //21.85-
+	  //set_rf_pwr_setpoint(1700); //26
+	  //set_rf_pwr_setpoint(2000); //33.6-
+	  //set_rf_pwr_setpoint(2200); //37.6
+	  //set_rf_pwr_setpoint(2300); //39.8
+	  //set_rf_pwr_setpoint(2500); //45.15-
+	  //set_rf_pwr_setpoint(2600); //46.1
+	  //set_rf_pwr_setpoint(dbm_to_alc(37));
+
+	  rf_pa_en(1);
+
+	  while(1)
+	  {
+		  //trx_data[CHIP_TX].pwr=63;
+		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  HAL_Delay(1000);
+
+		  //trx_data[CHIP_TX].pwr=3;
+		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  HAL_Delay(1000);
+	  }
+  }
+
   while(0) //temp test
   {
 	  float temp=0.0;
@@ -761,19 +793,50 @@ int main(void)
 
   while(0) //CC1200 TX output test
   {
-	  set_rf_pwr_setpoint(0);
-	  rf_pa_en(0);
+	  while(1)
+	  {
+		  trx_writecmd(CHIP_TX, STR_STX);
+		  set_rf_pwr_setpoint(dbm_to_alc(37));
+		  rf_pa_en(1);
+		  HAL_Delay(1000);
+
+		  set_rf_pwr_setpoint(0);
+		  rf_pa_en(0);
+		  trx_writecmd(CHIP_TX, STR_IDLE);
+		  HAL_Delay(1000);
+	  }
+  }
+
+  while(0) //CC1200 PLL test
+  {
+	  set_rf_pwr_setpoint(dbm_to_alc(47));
 
 	  while(1)
 	  {
-		  trx_data[CHIP_TX].pwr=63;
-		  trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
-		  trx_writecmd(CHIP_TX, STR_STX);
-		  HAL_Delay(1000);
-		  //trx_data[CHIP_TX].pwr=3;
-		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
-		  trx_writecmd(CHIP_TX, STR_IDLE);
-		  HAL_Delay(1000);
+		  //for(uint32_t f=430e6; f<=440e6; f+=1e6)
+		  for(uint32_t f=435e6; f<=440e6; )
+		  {
+			  rf_pa_en(0);
+			  uint32_t freq_word=roundf((float)f/5000000.0*((uint32_t)1<<16));
+			  trx_writecmd(CHIP_TX, STR_IDLE);
+			  trx_writereg(CHIP_TX, 0x2F0C, (freq_word>>16)&0xFF);
+			  trx_writereg(CHIP_TX, 0x2F0D, (freq_word>>8)&0xFF);
+			  trx_writereg(CHIP_TX, 0x2F0E, freq_word&0xFF);
+			  HAL_Delay(10);
+			  trx_writecmd(CHIP_TX, STR_STX);
+			  HAL_Delay(10);
+			  rf_pa_en(1);
+			  //dbg_print(0, "f=%ld sta=%d\n", f, trx_readreg(CHIP_TX, STR_SNOP)>>4);
+			  HAL_Delay(1000);
+			  //for(int8_t i=-63; i<=63; i++)
+			  while(1)
+			  {
+				  //trx_writereg(CHIP_TX, 0x2F7E, 256-63);
+				  //HAL_Delay(10);
+				  //trx_writereg(CHIP_TX, 0x2F7E, 63);
+				  //HAL_Delay(10);
+			  }
+		  }
 	  }
   }*/
 
@@ -808,15 +871,25 @@ int main(void)
 		  		  if(freq>=420e6 && freq<=440e6)
 		  		  {
 		  			  dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
+		  			  trx_writecmd(CHIP_RX, STR_IDLE);
+		  			  HAL_Delay(10);
 		  			  //reconfig RX
 		  			  trx_data[CHIP_RX].frequency=freq;
-		  			  config_rf(CHIP_RX, trx_data[CHIP_RX]); //optimize this later
-		  			  interface_resp(CMD_SET_RX_FREQ, 0); //OK
+		  			  uint32_t freq_word=roundf((float)freq/5000000.0*((uint32_t)1<<16));
+		  			  trx_writereg(CHIP_RX, 0x2F0C, (freq_word>>16)&0xFF);
+		  			  trx_writereg(CHIP_RX, 0x2F0D, (freq_word>>8)&0xFF);
+		  			  trx_writereg(CHIP_RX, 0x2F0E, freq_word&0xFF);
+		  			  trx_writecmd(CHIP_RX, STR_SRX);
+		  			  HAL_Delay(10);
+		  			  if(trx_readreg(CHIP_RX, STR_SNOP)>>4==STATE_RX) //PLL locked and state=RX?
+		  				  interface_resp(CMD_SET_RX_FREQ, ERR_OK); //OK
+		  			  else
+		  				interface_resp(CMD_SET_RX_FREQ, ERR_RX_PLL); //PLL lock error
 		  		  }
 		  		  else
 		  		  {
 		  			  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested RX frequency of %ld Hz is out of range\n", freq);
-		  			  interface_resp(CMD_SET_RX_FREQ, 1); //ERR
+		  			  interface_resp(CMD_SET_RX_FREQ, ERR_RANGE); //ERR
 		  		  }
 		  	  break;
 
@@ -825,15 +898,25 @@ int main(void)
 		  		  if(freq>=420e6 && freq<=440e6)
 		  		  {
 		  			  dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
+		  			  trx_writecmd(CHIP_TX, STR_IDLE);
+		  			  HAL_Delay(10);
 		  			  //reconfig TX
 		  			  trx_data[CHIP_TX].frequency=freq;
-		  			  config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
-		  			  interface_resp(CMD_SET_TX_FREQ, 0); //OK
+		  			  uint32_t freq_word=roundf((float)freq/5000000.0*((uint32_t)1<<16));
+		  			  trx_writereg(CHIP_TX, 0x2F0C, (freq_word>>16)&0xFF);
+		  			  trx_writereg(CHIP_TX, 0x2F0D, (freq_word>>8)&0xFF);
+		  			  trx_writereg(CHIP_TX, 0x2F0E, freq_word&0xFF);
+		  			  trx_writecmd(CHIP_TX, STR_IDLE);
+		  			  HAL_Delay(10);
+		  			  if(trx_readreg(CHIP_TX, STR_SNOP)>>4==STATE_TX) //PLL locked and state=TX?
+		  				  interface_resp(CMD_SET_TX_FREQ, ERR_OK); //OK
+		  			  else
+		  				  interface_resp(CMD_SET_TX_FREQ, ERR_TX_PLL); //PLL lock error
 		  		  }
 		  		  else
 		  		  {
 		  			  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested TX frequency of %ld Hz is out of range\n", freq);
-		  			  interface_resp(CMD_SET_TX_FREQ, 1); //ERR
+		  			  interface_resp(CMD_SET_TX_FREQ, ERR_RANGE); //ERR
 		  		  }
 			  break;
 
@@ -843,22 +926,24 @@ int main(void)
 					  tx_dbm=rxb[2]*0.25f;
 					  dbg_print(0, "[INTRFC_CMD] TX PWR %2.2f dBm\n", tx_dbm);
 					  alc_set=dbm_to_alc(tx_dbm);
-					  interface_resp(CMD_SET_TX_POWER, 0); //OK
+					  interface_resp(CMD_SET_TX_POWER, ERR_OK); //OK
 				  }
 				  else
 				  {
 					  //no change, return error code
 					  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested output power is out of range\n");
-					  interface_resp(CMD_SET_TX_POWER, 1); //ERR
+					  interface_resp(CMD_SET_TX_POWER, ERR_RANGE); //ERR
 				  }
 			  break;
 
 		  	  case CMD_SET_FREQ_CORR:
 		  		  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=*((int16_t*)&rxb[2]); //shared clock source, thus the same corr
-		  		  config_rf(CHIP_RX, trx_data[CHIP_RX]); //optimize this later
-		  		  config_rf(CHIP_TX, trx_data[CHIP_TX]); //optimize this later
+		  		  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
+		  		  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
+		  		  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
+		  		  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
 		  		  dbg_print(0, "[INTRFC_CMD] Frequency correction: %d\n", *((int16_t*)&rxb[2]));
-		  		  interface_resp(CMD_SET_TX_POWER, 0); //OK
+		  		  interface_resp(CMD_SET_TX_POWER, ERR_OK); //OK
 			  break;
 
 		  	  case CMD_SET_AFC:
@@ -873,15 +958,16 @@ int main(void)
 		  			  trx_writereg(CHIP_RX, 0x2F01, 0x02);
 		  			  dbg_print(TERM_GREEN, " disabled\n");
 		  		  }
-		  		  interface_resp(CMD_SET_AFC, 0); //OK
+		  		  interface_resp(CMD_SET_AFC, ERR_OK); //OK
 			  break;
 
 		  	  case CMD_SET_TX_START:
 		  		  if(tx_state==TX_IDLE && dev_err==ERR_OK)
 		  		  {
 		  			tx_state=TX_ACTIVE;
-		  			//trx_data[CHIP_TX].pwr=63;
-		  			//trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+		  			trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset sample
+
+		  			trx_writecmd(CHIP_TX, STR_STX);
 		  			set_rf_pwr_setpoint(alc_set);
 		  			rf_pa_en(1);
 		  			//dbg_print(0, "[INTRFC_CMD] TX -> start\n"); //takes time!
@@ -909,7 +995,7 @@ int main(void)
 		  	  case CMD_SET_RX:
 		  		  if(rxb[2]) //start
 		  		  {
-		  			  if(rx_state==RX_IDLE)// && dev_err==ERR_OK)
+		  			  if(rx_state==RX_IDLE && dev_err==ERR_OK)
 		  			  {
 		  				  dbg_print(0, "[INTRFC_CMD] RX start\n");
 		  				  rx_state=RX_ACTIVE;
@@ -1002,6 +1088,7 @@ int main(void)
 			  set_TP(TP2, 1);
 			  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
 			  set_rf_pwr_setpoint(0);
+			  trx_writecmd(CHIP_TX, STR_IDLE);
 			  HAL_Delay(50);
 			  rf_pa_en(0);
 			  set_TP(TP2, 0);
@@ -1408,8 +1495,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, DBG_TP1_Pin|DBG_TP2_Pin|RX_nCS_Pin|TX_nCS_Pin
-                          |PA_EN_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, DBG_TP1_Pin|DBG_TP2_Pin|PA_EN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, RX_nCS_Pin|TX_nCS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : DBG_TP1_Pin DBG_TP2_Pin RX_nCS_Pin TX_nCS_Pin
                            PA_EN_Pin */
@@ -1417,7 +1506,7 @@ static void MX_GPIO_Init(void)
                           |PA_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : TX_TRIG_Pin RX_TRIG_Pin */
@@ -1430,12 +1519,8 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
-
 /* USER CODE BEGIN MX_GPIO_Init_2 */
-  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn); //immediately disable it, as we don't need it right away
-  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //immediately disable it, as we don't need it right away
 /* USER CODE END MX_GPIO_Init_2 */
 }
 

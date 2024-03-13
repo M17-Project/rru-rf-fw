@@ -78,7 +78,6 @@ void Error_Handler(void);
 #define TX_TRIG_EXTI_IRQn EXTI9_5_IRQn
 #define RX_TRIG_Pin GPIO_PIN_11
 #define RX_TRIG_GPIO_Port GPIOA
-#define RX_TRIG_EXTI_IRQn EXTI15_10_IRQn
 #define RX_nCS_Pin GPIO_PIN_6
 #define RX_nCS_GPIO_Port GPIOB
 #define TX_nCS_Pin GPIO_PIN_7
