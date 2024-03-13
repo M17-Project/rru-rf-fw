@@ -908,7 +908,7 @@ int main(void)
 		  			  trx_writereg(CHIP_TX, 0x2F0E, freq_word&0xFF);
 		  			  trx_writecmd(CHIP_TX, STR_IDLE);
 		  			  HAL_Delay(10);
-		  			  if(trx_readreg(CHIP_TX, STR_SNOP)>>4==STATE_TX) //PLL locked and state=TX?
+		  			  if(trx_readreg(CHIP_TX, STR_SNOP)>>4==STATE_IDLE) //PLL locked and state=IDLE?
 		  				  interface_resp(CMD_SET_TX_FREQ, ERR_OK); //OK
 		  			  else
 		  				  interface_resp(CMD_SET_TX_FREQ, ERR_TX_PLL); //PLL lock error
