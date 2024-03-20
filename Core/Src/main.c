@@ -36,6 +36,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define DBG_MSGS								//enable debug messages over DBG_UART
 #define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
@@ -130,6 +131,7 @@ static void MX_TIM7_Init(void);
 /* USER CODE BEGIN 0 */
 void dbg_print(const char* color_code, const char* fmt, ...)
 {
+	#ifdef DBG_MSGS
 	char str[100];
 	va_list ap;
 
@@ -147,6 +149,7 @@ void dbg_print(const char* color_code, const char* fmt, ...)
 	{
 		HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
 	}
+	#endif
 }
 
 uint16_t dbm_to_alc(float dbm)
@@ -713,6 +716,7 @@ int main(void)
   }
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
+  //dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
 
   //enable interface comms over UART1
   //memset((uint8_t*)rxb, 0, sizeof(rxb));
