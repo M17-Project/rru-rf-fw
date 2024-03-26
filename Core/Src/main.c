@@ -940,14 +940,20 @@ int main(void)
 				  }
 			  break;
 
-		  	  case CMD_SET_FREQ_CORR:
-		  		  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=*((int16_t*)&rxb[2]); //shared clock source, thus the same corr
+		  	  case CMD_SET_RX_FREQ_CORR:
+		  		  trx_data[CHIP_RX].fcorr=*((int16_t*)&rxb[2]);
 		  		  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
 		  		  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
+		  		  dbg_print(0, "[INTRFC_CMD] RX frequency correction: %d\n", *((int16_t*)&rxb[2]));
+		  		  interface_resp(CMD_SET_RX_FREQ_CORR, ERR_OK); //OK
+			  break;
+
+		  	  case CMD_SET_TX_FREQ_CORR:
+		  		  trx_data[CHIP_TX].fcorr=*((int16_t*)&rxb[2]);
 		  		  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
 		  		  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
-		  		  dbg_print(0, "[INTRFC_CMD] Frequency correction: %d\n", *((int16_t*)&rxb[2]));
-		  		  interface_resp(CMD_SET_TX_POWER, ERR_OK); //OK
+		  		  dbg_print(0, "[INTRFC_CMD] TX frequency correction: %d\n", *((int16_t*)&rxb[2]));
+		  		  interface_resp(CMD_SET_TX_FREQ_CORR, ERR_OK); //OK
 			  break;
 
 		  	  case CMD_SET_AFC:
@@ -1053,7 +1059,7 @@ int main(void)
 			  break;
 
 		  	  case 0x0A:
-		  		set_rf_pwr_setpoint(0);
+		  		;//set_rf_pwr_setpoint(0);
 			  break;
 
 		  	  default:

@@ -15,10 +15,11 @@
 | 0x02    | 6          | Set TX frequency                      | 32-bit frequency in Hz    | 0/1                        |
 | 0x03    | 3          | Set TX power                          | 8-bit value, unsigned[1]  | 0/1                        |
 | 0x04    | -          | Reserved                              | -                         | -                          |
-| 0x05    | 4          | Set frequency correction              | 16-bit value, signed[2]   | 0/1                        |
-| 0x06    | 3          | Set Automatic Frequency Control (AFC) | 0/1                       | 0/1                        |
-| 0x07    | 2          | Transmission start                    | -                         | -                          |
-| 0x08    | 3          | Reception stop/start                  | 0/1                       | 0/1 at RX end only         |
+| 0x05    | 4          | Set RX frequency correction           | 16-bit value, signed[2]   | 0/1                        |
+| 0x06    | 4          | Set TX frequency correction           | 16-bit value, signed[2]   | 0/1                        |
+| 0x07    | 3          | Set Automatic Frequency Control (AFC) | 0/1                       | 0/1                        |
+| 0x08    | 2          | Transmission start                    | -                         | -                          |
+| 0x09    | 3          | Reception stop/start                  | 0/1                       | 0/1 at RX end only         |
 | ...     | ...        | ...                                   | ...                       | ...                        |
 | 0x80    | 2          | Get IDENT string                      | -                         | IDENT string               |
 | 0x81    | 2          | Get device's capabilities             | -                         | 8-bit value                |

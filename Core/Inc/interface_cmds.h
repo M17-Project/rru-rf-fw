@@ -2,11 +2,10 @@
  * interface_cmds.h
  *
  *  Created on: Dec 27, 2023
+ *  Revised on: Mar 26, 2024
  *      Author: SP5WWP
  */
-
-#ifndef INC_INTERFACE_CMDS_H_
-#define INC_INTERFACE_CMDS_H_
+#pragma once
 
 enum cmd_t
 {
@@ -17,7 +16,8 @@ enum cmd_t
 	CMD_SET_TX_FREQ,
 	CMD_SET_TX_POWER,
 	CMD_SET_RESERVED,
-	CMD_SET_FREQ_CORR,
+	CMD_SET_RX_FREQ_CORR,
+	CMD_SET_TX_FREQ_CORR,
 	CMD_SET_AFC,
 	CMD_SET_TX_START,
 	CMD_SET_RX,
@@ -30,5 +30,3 @@ enum cmd_t
 	CMD_GET_TX_POWER,
 	CMD_GET_FREQ_CORR
 };
-
-#endif /* INC_INTERFACE_CMDS_H_ */
