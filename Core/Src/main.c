@@ -256,23 +256,20 @@ void set_CS(enum trx_t trx, uint8_t state)
 
 uint8_t trx_readreg(enum trx_t trx, uint16_t addr)
 {
-	uint8_t txd[3]={0, 0, 0};
+	uint8_t txd[3]={addr>>8, addr&0xFF, 0};
 	uint8_t rxd[3]={0, 0, 0};
 
 	set_CS(trx, 0);
-	if((addr>>8)==0)
+	if(txd[0]==0)
 	{
-		txd[0]=(addr&0xFF)|0x80;
-		txd[1]=0;
-		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 2, 10);
+		txd[1]|=0x80;
+		HAL_SPI_TransmitReceive(&hspi1, &txd[1], rxd, 2, 10);
 		set_CS(trx, 1);
 		return rxd[1];
 	}
 	else
 	{
-		txd[0]=((addr>>8)&0xFF)|0x80;
-		txd[1]=addr&0xFF;
-		txd[2]=0;
+		txd[0]|=0x80;
 		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 3, 10);
 		set_CS(trx, 1);
 		return rxd[2];
@@ -284,17 +281,12 @@ void trx_writereg(enum trx_t trx, uint16_t addr, uint8_t val)
 	uint8_t txd[3]={addr>>8, addr&0xFF, val};
 
 	set_CS(trx, 0);
-	if((addr>>8)==0)
+	if(txd[0]==0)
 	{
-		txd[0]=addr&0xFF;
-		txd[1]=val;
-		HAL_SPI_Transmit(&hspi1, txd, 2, 10);
+		HAL_SPI_Transmit(&hspi1, &txd[1], 2, 10);
 	}
 	else
 	{
-		txd[0]=(addr>>8)&0xFF;
-		txd[1]=addr&0xFF;
-		txd[2]=val;
 		HAL_SPI_Transmit(&hspi1, txd, 3, 10);
 	}
 	set_CS(trx, 1);
@@ -848,11 +840,11 @@ int main(void)
   {
 	  if(interface_comm==COMM_RDY) //if a valid interface frame is detected
 	  {
-		  set_TP(TP1, 1);
+		  //set_TP(TP1, 1);
 		  HAL_UART_AbortReceive_IT(&huart1);
 		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 		  interface_comm=COMM_IDLE;
-		  set_TP(TP1, 0);
+		  //set_TP(TP1, 0);
 
 		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[0], rxb[1]);
 
@@ -1079,7 +1071,7 @@ int main(void)
 	  if(bsb_tx_pend==1)
 	  {
 		  //debug
-		  //set_TP(TP2, 1);
+		  set_TP(TP1, 1);
 
 		  //send baseband sample ASAP
 		  trx_writereg(CHIP_TX, 0x2F7E, (uint8_t)tx_bsb_sample); //write single byte
@@ -1113,7 +1105,7 @@ int main(void)
 		  bsb_tx_pend=0;
 
 		  //debug
-		  //set_TP(TP2, 0);
+		  set_TP(TP1, 0);
 	  }
 
 	  if(bsb_rx_pend==1)
