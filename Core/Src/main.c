@@ -1050,7 +1050,7 @@ int main(void)
 		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
 			  break;
 
-		  	  case 0x0A:
+		  	  case 0x20:
 		  		;//set_rf_pwr_setpoint(0);
 			  break;
 
@@ -1087,6 +1087,7 @@ int main(void)
 			  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //disable external baseband sample trigger signal
 			  //trx_data[CHIP_TX].pwr=3; //set it back to low power
 			  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
+			  interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
 			  set_TP(TP2, 1);
 			  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
 			  set_rf_pwr_setpoint(0);
