@@ -7,7 +7,7 @@ CARI protocol along with the table below is still under development and therefor
 
 | Command ID | Byte count | Params         |
 |------------|------------|----------------|
-| 1 byte     | 2 byte     | 0..65532 bytes |
+| 1 byte     | 2 bytes    | 0..65532 bytes |
 
 ### Command list
 
