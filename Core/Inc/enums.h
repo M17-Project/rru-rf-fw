@@ -56,12 +56,10 @@ enum interface_comm_t
 
 enum err_t
 {
-	ERR_OK,					//all good
 	ERR_RX_PLL,				//RX PLL lock error
 	ERR_TX_PLL,				//TX PLL lock error
 	ERR_RX_SPI,				//RX SPI comms error
 	ERR_TX_SPI,				//TX SPI comms error
-	ERR_RANGE				//value out of range
 };
 
 //internal TRX state, as per p. 8 of the datasheet
