@@ -24,7 +24,7 @@ CARI protocol along with the table below is still under development and therefor
 | 0x08    | -          | Reserved                              | -                            | -                          |
 | 0x09    | 4          | Reception stop/start                  | 0/1                          | 0 at RX end only           |
 | 0x0A    | variable   | ZMQ-SUB connect to publisher          | BBU address as string[3]     | 0/1                        |
-| 0x0B    | variable   | Send data packet                      | array of bytes, floats, etc. | 0/1                        |
+| 0x0B    | variable   | Stream chunk                          | array of bytes, floats, etc. | 0/1                        |
 | ...     | ...        | ...                                   | ...                          | ...                        |
 | 0x80    | 3          | Get IDENT string                      | -                            | IDENT string               |
 | 0x81    | 3          | Get device's capabilities             | -                            | 8-bit value                |

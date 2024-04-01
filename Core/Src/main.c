@@ -40,8 +40,9 @@
 #define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
 #define VDDA			(3.24f)					//measured VDDA voltage
 #define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
-#define BSB_BUFLEN		(6*960U)				//tx/rx buffer size in samples (240ms at fs=24kHz)
-#define BSB_THRESH		(2*960U)				//80ms worth of baseband data (at 24kHz)
+#define BSB_TX_BUFLEN	(6*960U)				//tx buffer size in samples (240ms at fs=24kHz)
+#define BSB_TX_THRESH	(2*960U)				//80ms worth of baseband data (at 24kHz)
+#define BSB_RX_BUFLEN	(2*960U)				//how many samples do we need to collect before sending them over CARI?
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -84,11 +85,13 @@ float tx_dbm=0.0f;											//RF power setpoint, dBm
 //buffers and interface stuff
 volatile uint8_t rxb[1000]={0};								//rx buffer for interface data
 volatile uint32_t rx_bc=0;									//UART1 rx byte counter
-volatile int8_t tx_bsb_buff[BSB_BUFLEN]={0};				//buffer for transmission
-volatile uint32_t tx_bsb_total_cnt=0;						//how many samples were received
-uint32_t tx_bsb_cnt=0;										//how many samples were transmitted
-int8_t tx_bsb_sample=0;										//current tx sample
-int8_t rx_bsb_sample=0;										//current rx sample
+volatile int8_t tx_bsb_buff[BSB_TX_BUFLEN]={0};				//buffer for transmission
+volatile int8_t rx_bsb_buff[BSB_RX_BUFLEN]={0};				//buffer for reception
+volatile uint32_t tx_bsb_total_cnt=0;						//how many samples were received (over CARI)
+volatile uint32_t tx_bsb_cnt=0;								//how many samples were transmitted
+volatile uint32_t rx_bsb_cnt=0;								//how many samples were received (from CC1200)
+volatile uint8_t rx_bsb_buff_rdy=0;							//which part of rx_bsb_buff is ready to be sent out (0-none)
+volatile uint8_t bsb_tx_cplt=0;								//baseband transmission over RF complete?
 
 enum trx_state_t tx_state=TX_IDLE;							//transmitter state
 enum trx_state_t rx_state=RX_IDLE;							//receiver state
@@ -546,7 +549,34 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin==TX_TRIG_Pin)
 	{
-		bsb_trig=1;
+		if(rx_state==RX_ACTIVE)
+		{
+			rx_bsb_buff[rx_bsb_cnt]=trx_readreg(CHIP_RX, 0x2F7D);
+			rx_bsb_cnt++;
+
+			if(rx_bsb_cnt>=BSB_RX_BUFLEN)
+			{
+				rx_bsb_cnt=0;
+				rx_bsb_buff_rdy=2;
+			}
+			else if(rx_bsb_cnt==BSB_RX_BUFLEN/2)
+			{
+				rx_bsb_buff_rdy=1;
+			}
+		}
+
+		if(tx_state==TX_ACTIVE)
+		{
+			//write single byte
+			if(bsb_tx_cplt==0)
+			{
+				trx_writereg(CHIP_TX, 0x2F7E, tx_bsb_buff[tx_bsb_cnt%BSB_TX_BUFLEN]);
+				tx_bsb_cnt++;
+
+				if(tx_bsb_cnt>=tx_bsb_total_cnt)
+					bsb_tx_cplt=1;
+			}
+		}
 	}
 }
 
@@ -950,6 +980,8 @@ int main(void)
 		  		  {
 		  			  if(rx_state==RX_IDLE && dev_err==ERR_OK)
 		  			  {
+		  				  rx_bsb_cnt=0;
+		  				  memset((uint8_t*)rx_bsb_buff, 0, BSB_RX_BUFLEN);
 		  				  dbg_print(0, "[INTRFC_CMD] RX start\n");
 		  				  rx_state=RX_ACTIVE;
 		  			  }
@@ -961,6 +993,7 @@ int main(void)
 		  		  else //stop
 		  		  {
 		  			  rx_state=RX_IDLE;
+		  			  rx_bsb_buff_rdy=0;
 		  			  interface_resp(CMD_SET_RX, 0); //OK
 		  			  dbg_print(0, "[INTRFC_CMD] RX stop\n");
 		  		  }
@@ -969,9 +1002,9 @@ int main(void)
 		  	  case CMD_STREAM_DATA:
 		  		  //dbg_print(0, "[INTRFC_CMD] Stream data received (%d bytes)\n", *((uint16_t*)&rxb[1]));
 		  		  uint32_t len=*((uint16_t*)&rxb[1])-3;
-		  		  memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_BUFLEN], (uint8_t*)&rxb[3], len);
+		  		  memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_TX_BUFLEN], (uint8_t*)&rxb[3], len);
 		  		  tx_bsb_total_cnt+=len;
-		  		  if(tx_bsb_total_cnt>=BSB_THRESH && tx_state==TX_IDLE)
+		  		  if(tx_bsb_total_cnt>=BSB_TX_THRESH && tx_state==TX_IDLE)
 		  		  {
 		  			  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset sample
 		  			  trx_writecmd(CHIP_TX, STR_STX);
@@ -1027,7 +1060,7 @@ int main(void)
 		  interface_comm=COMM_IDLE;
 	  }
 
-	  if(bsb_trig==1)
+	  /*if(bsb_trig==1)
 	  {
 		  if(tx_state==TX_ACTIVE)
 		  {
@@ -1036,18 +1069,18 @@ int main(void)
 
 			  //send baseband sample ASAP
 			  trx_writereg(CHIP_TX, 0x2F7E, (uint8_t)tx_bsb_sample); //write single byte
-			  //set_dac_ch2(tx_bsb_sample*31+2048); //debug - check how the signal looks like
+
+			  //debug - check how the signal looks like
+			  //set_dac_ch2(tx_bsb_sample*31+2048);
 
 			  //fetch another sample
-			  tx_bsb_sample=tx_bsb_buff[tx_bsb_cnt%BSB_BUFLEN];
+			  tx_bsb_sample=tx_bsb_buff[tx_bsb_cnt%BSB_TX_BUFLEN];
 			  tx_bsb_cnt++;
 
 			  //nothing else to transmit
 			  if(tx_bsb_cnt>=tx_bsb_total_cnt)
 			  {
 				  set_TP(TP2, 1);
-				  //trx_data[CHIP_TX].pwr=3; //set it back to low power
-				  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 				  //interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
 
 				  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
@@ -1069,14 +1102,64 @@ int main(void)
 			  set_TP(TP1, 0);
 		  }
 
-		  if(rx_state==RX_ACTIVE)
+		  bsb_trig=0;
+	  }*/
+
+	  //baseband transmission complete
+	  if(bsb_tx_cplt)
+	  {
+		  //debug
+		  set_TP(TP2, 1);
+
+		  //interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
+
+		  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
+		  set_rf_pwr_setpoint(0);
+		  trx_writecmd(CHIP_TX, STR_IDLE);
+		  HAL_Delay(50);
+		  rf_pa_en(0);
+
+		  tx_state=TX_IDLE;
+		  tx_bsb_cnt=0;
+		  tx_bsb_total_cnt=0;
+		  bsb_tx_cplt=0;
+
+		  //dbg_print(0, "[SELF] TX -> end\n"); //takes time!
+
+		  //debug
+		  set_TP(TP2, 0);
+	  }
+
+	  //rx baseband buffer ready to be sent over UART
+	  if(rx_bsb_buff_rdy)
+	  {
+		  uint32_t len=BSB_RX_BUFLEN/2+3;
+		  uint8_t h_buff[BSB_RX_BUFLEN/2+3]={CMD_STREAM_DATA, len&0xFF, len>>8};
+
+		  if(rx_bsb_buff_rdy==1)
 		  {
-			  //fetch baseband sample
-			  rx_bsb_sample=trx_readreg(CHIP_RX, 0x2F7D);
-			  HAL_UART_Transmit_IT(&huart1, (uint8_t*)&rx_bsb_sample, 1);
+			  //debug
+			  //set_TP(TP1, 1);
+
+			  memcpy(&h_buff[3], (uint8_t*)&rx_bsb_buff[0], BSB_RX_BUFLEN/2);
+			  HAL_UART_Transmit_IT(&huart1, h_buff, len);
+
+			  //debug
+			  //set_TP(TP1, 0);
+		  }
+		  else //implicit rx_bsb_buff_rdy==2
+		  {
+			  //debug
+			  //set_TP(TP2, 1);
+
+			  memcpy(&h_buff[3], (uint8_t*)&rx_bsb_buff[BSB_RX_BUFLEN/2], BSB_RX_BUFLEN/2);
+			  HAL_UART_Transmit_IT(&huart1, h_buff, len);
+
+			  //debug
+			  //set_TP(TP2, 0);
 		  }
 
-		  bsb_trig=0;
+		  rx_bsb_buff_rdy=0;
 	  }
     /* USER CODE END WHILE */
 
