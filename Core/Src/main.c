@@ -1060,51 +1060,6 @@ int main(void)
 		  interface_comm=COMM_IDLE;
 	  }
 
-	  /*if(bsb_trig==1)
-	  {
-		  if(tx_state==TX_ACTIVE)
-		  {
-			  //debug
-			  set_TP(TP1, 1);
-
-			  //send baseband sample ASAP
-			  trx_writereg(CHIP_TX, 0x2F7E, (uint8_t)tx_bsb_sample); //write single byte
-
-			  //debug - check how the signal looks like
-			  //set_dac_ch2(tx_bsb_sample*31+2048);
-
-			  //fetch another sample
-			  tx_bsb_sample=tx_bsb_buff[tx_bsb_cnt%BSB_TX_BUFLEN];
-			  tx_bsb_cnt++;
-
-			  //nothing else to transmit
-			  if(tx_bsb_cnt>=tx_bsb_total_cnt)
-			  {
-				  set_TP(TP2, 1);
-				  //interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
-
-				  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
-				  set_rf_pwr_setpoint(0);
-				  trx_writecmd(CHIP_TX, STR_IDLE);
-				  HAL_Delay(50);
-				  rf_pa_en(0);
-
-				  tx_state=TX_IDLE;
-				  tx_bsb_cnt=0;
-				  tx_bsb_total_cnt=0;
-				  tx_bsb_sample=0;
-
-				  //dbg_print(0, "[SELF] TX -> end\n"); //takes time!
-				  set_TP(TP2, 0); //debug
-			  }
-
-			  //debug
-			  set_TP(TP1, 0);
-		  }
-
-		  bsb_trig=0;
-	  }*/
-
 	  //baseband transmission complete
 	  if(bsb_tx_cplt)
 	  {
