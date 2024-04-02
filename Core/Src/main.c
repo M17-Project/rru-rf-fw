@@ -527,7 +527,7 @@ float m17_map_symbol(uint8_t dibit)
 
 void interface_resp(enum cari_cmd_t cmd, uint8_t resp)
 {
-	uint8_t tmp[4]={cmd, 3, 0, resp};
+	uint8_t tmp[4]={cmd, 4, 0, resp};
 	HAL_UART_Transmit_IT(&huart1, tmp, 4);
 }
 
@@ -723,7 +723,7 @@ int main(void)
   }
 
   trx_writecmd(CHIP_RX, STR_SRX);
-  trx_writecmd(CHIP_TX, STR_IDLE);
+  trx_writecmd(CHIP_TX, STR_STX);
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
   //dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
@@ -872,7 +872,7 @@ int main(void)
 
 		  uint32_t freq;
 		  uint8_t ident[128]={0};
-		  uint8_t resp[10]; //response buffer
+		  uint8_t resp[15]; //response buffer
 
 		  switch(rxb[0])
 		  {
@@ -965,7 +965,7 @@ int main(void)
 			  break;
 
 		  	  case CMD_SET_TX_FREQ_CORR:
-		  		trx_data[CHIP_TX].fcorr=roundf((trx_data[CHIP_TX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
+		  		  trx_data[CHIP_TX].fcorr=roundf((trx_data[CHIP_TX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
 		  		  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
 		  		  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
 		  		  dbg_print(0, "[INTRFC_CMD] TX frequency correction: %d\n", *((int16_t*)&rxb[3]));
@@ -1006,6 +1006,8 @@ int main(void)
 		  		  {
 		  			  rx_state=RX_IDLE;
 		  			  rx_bsb_buff_rdy=0;
+		  			  //give it some time to finish pending transfers
+		  			  HAL_Delay(40);
 		  			  interface_resp(CMD_SET_RX, 0); //OK
 		  			  dbg_print(0, "[INTRFC_CMD] RX stop\n");
 		  		  }
@@ -1043,21 +1045,21 @@ int main(void)
 			  break;
 
 		  	  case CMD_GET_RX_FREQ:
-		  		  dbg_print(0, "[INTRFC_CMD] GET_RX_FREQT\n");
+		  		  dbg_print(0, "[INTRFC_CMD] GET_RX_FREQ\n");
 		  		  resp[0]=CMD_GET_RX_FREQ;
 		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
 		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_RX].frequency, sizeof(uint32_t));
-		  		  memset(&resp[7], 0, 4);
+		  		  memset(&resp[7], 0, 4); //MSB to 0
 		  		  HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
 		  	  case CMD_GET_TX_FREQ:
-		  		dbg_print(0, "[INTRFC_CMD] GET_TX_FREQ\n");
-		  		resp[0]=CMD_GET_TX_FREQ;
-		  		*((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
-		  		memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
-		  		memset(&resp[7], 0, 4);
-		  		HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
+		  		  dbg_print(0, "[INTRFC_CMD] GET_TX_FREQ\n");
+		  		  resp[0]=CMD_GET_TX_FREQ;
+		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
+		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
+		  		  memset(&resp[7], 0, 4); //MSB to 0
+		  		  HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
 		  	  case 0x20:
@@ -1088,7 +1090,7 @@ int main(void)
 
 		  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
 		  set_rf_pwr_setpoint(0);
-		  trx_writecmd(CHIP_TX, STR_IDLE);
+		  //trx_writecmd(CHIP_TX, STR_IDLE); //NOTE: putting the transmitter to idle disables 24kHz sample clock
 		  HAL_Delay(50);
 		  rf_pa_en(0);
 
