@@ -1063,7 +1063,7 @@ int main(void)
 			  break;
 
 		  	  case 0x20:
-		  		;//set_rf_pwr_setpoint(0);
+		  		  ;//set_rf_pwr_setpoint(0);
 			  break;
 
 		  	  default:
