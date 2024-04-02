@@ -36,13 +36,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define DBG_MSGS								//enable debug messages over DBG_UART
+#define DBG_MSGS									//enable debug messages over DBG_UART
 #define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
-#define VDDA			(3.24f)					//measured VDDA voltage
-#define CC1200_REG_NUM	51						//number of regs used to initialize CC1200s
-#define BSB_TX_BUFLEN	(6*960U)				//tx buffer size in samples (240ms at fs=24kHz)
-#define BSB_TX_THRESH	(2*960U)				//80ms worth of baseband data (at 24kHz)
-#define BSB_RX_BUFLEN	(2*960U)				//how many samples do we need to collect before sending them over CARI?
+#define VDDA			(3.24f)						//measured VDDA voltage
+#define CC1200_REG_NUM	51							//number of regs used to initialize CC1200s
+#define BSB_TX_BUFLEN	(6*960U)					//tx buffer size in samples (240ms at fs=24kHz)
+#define BSB_TX_THRESH	(2*960U)					//80ms worth of baseband data (at 24kHz)
+#define BSB_RX_BUFLEN	(2*960U)					//how many samples do we need to collect before sending them over CARI?
+
+#define FCORR_STEP		(40.0e6f/262144.0f/8.0f)	//unit value for frequency correction
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -676,7 +678,8 @@ int main(void)
 
   trx_data[CHIP_RX].frequency=433475000;				//default
   trx_data[CHIP_TX].frequency=435000000;
-  trx_data[CHIP_RX].fcorr=trx_data[CHIP_TX].fcorr=0;	//shared clock source, thus the same corr
+  trx_data[CHIP_RX].fcorr=0;
+  trx_data[CHIP_TX].fcorr=0;
   trx_data[CHIP_TX].pwr=63;								//3 to 63
   tx_dbm=30.00f;										//30dBm (1W) default
   alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
@@ -687,8 +690,8 @@ int main(void)
   dbg_print(TERM_GREEN, " done\n");
 
   HAL_Delay(50);
-  trx_writecmd(CHIP_RX, STR_SRX);
-  trx_writecmd(CHIP_TX, STR_STX);
+  trx_writecmd(CHIP_RX, STR_SCAL);
+  trx_writecmd(CHIP_TX, STR_SCAL);
 
   HAL_Delay(50);
   trx_data[CHIP_RX].pll_locked = ((trx_readreg(CHIP_RX, 0x2F8D)^0x80)&0x81)==0x81; //FSCAL_CTRL=1 and FSCAL_CTRL_NOT_USED=0
@@ -718,6 +721,9 @@ int main(void)
   	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_SPI, errstrings[ERR_TX_SPI]);
   	  dev_err|=(1UL<<ERR_TX_SPI);
   }
+
+  trx_writecmd(CHIP_RX, STR_SRX);
+  trx_writecmd(CHIP_TX, STR_IDLE);
 
   //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
   //dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
@@ -801,10 +807,14 @@ int main(void)
 
   while(0) //CC1200 TX output test
   {
+	  trx_data[CHIP_TX].fcorr=roundf(-4000.0f/FCORR_STEP);
+	  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
+	  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
+
 	  while(1)
 	  {
 		  trx_writecmd(CHIP_TX, STR_STX);
-		  set_rf_pwr_setpoint(dbm_to_alc(37));
+		  set_rf_pwr_setpoint(dbm_to_alc(30));
 		  rf_pa_en(1);
 		  HAL_Delay(1000);
 
@@ -866,6 +876,7 @@ int main(void)
 
 		  switch(rxb[0])
 		  {
+		  	  //PING
 		  	  case CMD_PING:
 		  		  dbg_print(0, "[INTRFC_CMD] PING\n");
 		  		  resp[0]=CMD_PING;
@@ -874,8 +885,9 @@ int main(void)
 		  		  HAL_UART_Transmit_IT(&huart1, resp, 7); //error code, 0 for OK
 		  	  break;
 
+		  	  //SET commands
 		  	  case CMD_SET_RX_FREQ:
-		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t));
+		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //we take 4 least significant bytes
 		  		  if(freq>=420e6 && freq<=440e6)
 		  		  {
 		  			  dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
@@ -902,7 +914,7 @@ int main(void)
 		  	  break;
 
 		  	  case CMD_SET_TX_FREQ:
-		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //no sanity checks
+		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //we take 4 least significant bytes
 		  		  if(freq>=420e6 && freq<=440e6)
 		  		  {
 		  			  dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
@@ -945,7 +957,7 @@ int main(void)
 			  break;
 
 		  	  case CMD_SET_RX_FREQ_CORR:
-		  		  trx_data[CHIP_RX].fcorr=*((int16_t*)&rxb[3]);
+		  		  trx_data[CHIP_RX].fcorr=roundf((trx_data[CHIP_RX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
 		  		  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
 		  		  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
 		  		  dbg_print(0, "[INTRFC_CMD] RX frequency correction: %d\n", *((int16_t*)&rxb[3]));
@@ -953,7 +965,7 @@ int main(void)
 			  break;
 
 		  	  case CMD_SET_TX_FREQ_CORR:
-		  		  trx_data[CHIP_TX].fcorr=*((int16_t*)&rxb[3]);
+		  		trx_data[CHIP_TX].fcorr=roundf((trx_data[CHIP_TX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
 		  		  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
 		  		  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
 		  		  dbg_print(0, "[INTRFC_CMD] TX frequency correction: %d\n", *((int16_t*)&rxb[3]));
@@ -1014,32 +1026,38 @@ int main(void)
 		  		  }
 		  	  break;
 
+		  	  //GET commands
 		  	  case CMD_GET_IDENT:
 		  		  dbg_print(0, "[INTRFC_CMD] GET_IDENT\n");
 				  //reply with RRU's IDENT string
-				  sprintf((char*)&ident[2], IDENT_STR);
-				  ident[0]=0x80; //a reply to "Get IDENT string" command
-				  ident[1]=strlen((char*)IDENT_STR)+2; //total length
-				  HAL_UART_Transmit_IT(&huart1, ident, ident[1]);
+				  sprintf((char*)&ident[3], IDENT_STR);
+				  ident[0]=CMD_GET_IDENT;
+				  *((uint16_t*)&ident[1])=strlen((char*)IDENT_STR)+3; //total length
+				  HAL_UART_Transmit_IT(&huart1, ident, *((uint16_t*)&ident[1]));
 			  break;
 
 		  	  case CMD_GET_CAPS:
+		  		  dbg_print(0, "[INTRFC_CMD] GET_CAPS\n");
 				  //so far the RRU can do FM only, duplex
 				  interface_resp(CMD_GET_CAPS, (1<<CAP_FM)|(1<<CAP_DUPLEX));
 			  break;
 
 		  	  case CMD_GET_RX_FREQ:
+		  		  dbg_print(0, "[INTRFC_CMD] GET_RX_FREQT\n");
 		  		  resp[0]=CMD_GET_RX_FREQ;
-		  		  resp[1]=sizeof(uint32_t)+2;
-		  		  memcpy(&resp[2], (uint8_t*)&trx_data[CHIP_RX].frequency, sizeof(uint32_t));
-		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
+		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
+		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_RX].frequency, sizeof(uint32_t));
+		  		  memset(&resp[7], 0, 4);
+		  		  HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
 		  	  case CMD_GET_TX_FREQ:
-		  		  resp[0]=CMD_GET_TX_FREQ;
-		  		  resp[1]=sizeof(uint32_t)+2;
-		  		  memcpy(&resp[2], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
-		  		  HAL_UART_Transmit_IT(&huart1, resp, resp[1]);
+		  		dbg_print(0, "[INTRFC_CMD] GET_TX_FREQ\n");
+		  		resp[0]=CMD_GET_TX_FREQ;
+		  		*((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
+		  		memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
+		  		memset(&resp[7], 0, 4);
+		  		HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
 		  	  case 0x20:
