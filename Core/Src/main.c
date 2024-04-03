@@ -888,7 +888,7 @@ int main(void)
 		  	  //SET commands
 		  	  case CMD_SET_RX_FREQ:
 		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //we take 4 least significant bytes
-		  		  if(freq>=420e6 && freq<=440e6)
+		  		  if(freq>=420e6 && freq<=450e6)
 		  		  {
 		  			  dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
 		  			  trx_writecmd(CHIP_RX, STR_IDLE);
@@ -915,7 +915,7 @@ int main(void)
 
 		  	  case CMD_SET_TX_FREQ:
 		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //we take 4 least significant bytes
-		  		  if(freq>=420e6 && freq<=440e6)
+		  		  if(freq>=420e6 && freq<=450e6)
 		  		  {
 		  			  dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
 		  			  trx_writecmd(CHIP_TX, STR_IDLE);
