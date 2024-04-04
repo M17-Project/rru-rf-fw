@@ -95,8 +95,8 @@ volatile uint32_t rx_bsb_cnt=0;								//how many samples were received (from CC
 volatile uint8_t rx_bsb_buff_rdy=0;							//which part of rx_bsb_buff is ready to be sent out (0-none)
 volatile uint8_t bsb_tx_cplt=0;								//baseband transmission over RF complete?
 
-enum trx_state_t tx_state=TX_IDLE;							//transmitter state
-enum trx_state_t rx_state=RX_IDLE;							//receiver state
+volatile enum trx_state_t tx_state=TX_IDLE;					//transmitter state
+volatile enum trx_state_t rx_state=RX_IDLE;					//receiver state
 volatile uint8_t bsb_trig=0;								//24kHz baseband trigger signal
 volatile enum interface_comm_t interface_comm=COMM_IDLE;	//interface comm status
 
@@ -256,7 +256,7 @@ void set_CS(enum trx_t trx, uint8_t state)
 	}
 }
 
-uint8_t trx_readreg(enum trx_t trx, uint16_t addr)
+uint8_t trx_readreg(enum trx_t trx, const uint16_t addr)
 {
 	uint8_t txd[3]={addr>>8, addr&0xFF, 0};
 	uint8_t rxd[3]={0, 0, 0};
@@ -278,20 +278,23 @@ uint8_t trx_readreg(enum trx_t trx, uint16_t addr)
 	}
 }
 
-void trx_writereg(enum trx_t trx, uint16_t addr, uint8_t val)
+uint8_t trx_writereg(enum trx_t trx, const uint16_t addr, const uint8_t val)
 {
 	uint8_t txd[3]={addr>>8, addr&0xFF, val};
+	uint8_t rxd[3]={0, 0, 0};
 
 	set_CS(trx, 0);
 	if(txd[0]==0)
 	{
-		HAL_SPI_Transmit(&hspi1, &txd[1], 2, 10);
+		HAL_SPI_TransmitReceive(&hspi1, &txd[1], rxd, 2, 10);
 	}
 	else
 	{
-		HAL_SPI_Transmit(&hspi1, txd, 3, 10);
+		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 3, 10);
 	}
 	set_CS(trx, 1);
+
+	return rxd[0]>>7; //bit 7 is the `CHIP_RDYn` and should be low for normal operation
 }
 
 void trx_writecmd(enum trx_t trx, uint8_t addr)
@@ -553,6 +556,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	{
 		if(rx_state==RX_ACTIVE)
 		{
+			set_TP(TP1, 1);
 			rx_bsb_buff[rx_bsb_cnt]=trx_readreg(CHIP_RX, 0x2F7D);
 			rx_bsb_cnt++;
 
@@ -565,10 +569,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 			{
 				rx_bsb_buff_rdy=1;
 			}
+			set_TP(TP1, 0);
 		}
 
 		if(tx_state==TX_ACTIVE)
 		{
+			set_TP(TP2, 1);
 			//write single byte
 			if(bsb_tx_cplt==0)
 			{
@@ -578,6 +584,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 				if(tx_bsb_cnt>=tx_bsb_total_cnt)
 					bsb_tx_cplt=1;
 			}
+			set_TP(TP2, 0);
 		}
 	}
 }
@@ -1020,8 +1027,7 @@ int main(void)
 		  		  tx_bsb_total_cnt+=len;
 		  		  if(tx_bsb_total_cnt>=BSB_TX_THRESH && tx_state==TX_IDLE)
 		  		  {
-		  			  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset sample
-		  			  trx_writecmd(CHIP_TX, STR_STX);
+		  			  ; //TODO: set tx CC1200 power to max
 		  			  set_rf_pwr_setpoint(alc_set);
 		  			  rf_pa_en(1);
 		  			  tx_state=TX_ACTIVE;
@@ -1084,13 +1090,12 @@ int main(void)
 	  if(bsb_tx_cplt)
 	  {
 		  //debug
-		  set_TP(TP2, 1);
+		  //set_TP(TP2, 1);
 
 		  //interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
 
-		  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency offset at TX idle
+		  ; //TODO: set tx cc2100 power to the minimum at TX idle
 		  set_rf_pwr_setpoint(0);
-		  //trx_writecmd(CHIP_TX, STR_IDLE); //NOTE: putting the transmitter to idle disables 24kHz sample clock
 		  HAL_Delay(50);
 		  rf_pa_en(0);
 
@@ -1102,7 +1107,7 @@ int main(void)
 		  //dbg_print(0, "[SELF] TX -> end\n"); //takes time!
 
 		  //debug
-		  set_TP(TP2, 0);
+		  //set_TP(TP2, 0);
 	  }
 
 	  //rx baseband buffer ready to be sent over UART
