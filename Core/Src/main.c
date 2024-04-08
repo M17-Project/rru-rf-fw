@@ -65,6 +65,8 @@ TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_usart1_tx;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE BEGIN PV */
 #include "enums.h"
@@ -504,34 +506,10 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 	trx_writereg(trx, 0x2F14, 1<<6);
 }
 
-float m17_map_symbol(uint8_t dibit)
-{
-	switch(dibit)
-	{
-		case 0b00:
-			return +1.0f;
-		break;
-
-		case 0b01:
-			return +3.0f;
-		break;
-
-		case 0b10:
-			return -1.0f;
-		break;
-
-		case 0b11:
-			return -3.0f;
-		break;
-	}
-
-	return 0.0f;
-}
-
-void interface_resp(enum cari_cmd_t cmd, uint8_t resp)
+void interface_resp(enum cari_cmd_t cmd, const uint8_t resp)
 {
 	uint8_t tmp[4]={cmd, 4, 0, resp};
-	HAL_UART_Transmit_IT(&huart1, tmp, 4);
+	HAL_UART_Transmit_DMA(&huart1, tmp, 4);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -595,7 +573,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 	if(iface==USART1)
 	{
-		rx_bc++;
+		/*rx_bc++;
 		//check frame's validity
 		if(rx_bc>=3 && rx_bc==*((uint16_t*)&rxb[1]))
 		{
@@ -617,6 +595,24 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		else //overflow
 		{
 			interface_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
+		}*/
+		if(interface_comm==COMM_NEXT)
+		{
+			HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
+			interface_comm=COMM_RDY;
+		}
+		else
+		{
+			if(rxb[0]==CMD_PING || rxb[0]>=CMD_GET_IDENT)
+			{
+				HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
+				interface_comm=COMM_RDY;
+			}
+			else
+			{
+				HAL_UART_Receive_DMA(&huart1, (uint8_t*)&rxb[3], *((uint16_t*)&rxb[1])-3);
+				interface_comm=COMM_NEXT;
+			}
 		}
 	}
 }
@@ -687,7 +683,7 @@ int main(void)
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=0;
   trx_data[CHIP_TX].fcorr=0;
-  trx_data[CHIP_TX].pwr=63;								//3 to 63
+  trx_data[CHIP_TX].pwr=63;								//3 to 63, TODO: set to 3
   tx_dbm=30.00f;										//30dBm (1W) default
   alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
 
@@ -737,7 +733,7 @@ int main(void)
 
   //enable interface comms over UART1
   //memset((uint8_t*)rxb, 0, sizeof(rxb));
-  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
+  HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
 
   /* USER CODE END 2 */
 
@@ -870,8 +866,8 @@ int main(void)
 	  if(interface_comm==COMM_RDY) //if a valid interface frame is detected
 	  {
 		  //set_TP(TP1, 1);
-		  HAL_UART_AbortReceive_IT(&huart1);
-		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
+		  //HAL_UART_AbortReceive_IT(&huart1);
+		  //HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 		  interface_comm=COMM_IDLE;
 		  //set_TP(TP1, 0);
 
@@ -889,7 +885,7 @@ int main(void)
 		  		  resp[0]=CMD_PING;
 		  		  *((uint16_t*)&resp[1])=7;
 		  		  memcpy(&resp[3], (uint8_t*)&dev_err, sizeof(uint32_t));
-		  		  HAL_UART_Transmit_IT(&huart1, resp, 7); //error code, 0 for OK
+		  		  HAL_UART_Transmit_DMA(&huart1, resp, 7); //error code, 0 for OK
 		  	  break;
 
 		  	  //SET commands
@@ -933,9 +929,9 @@ int main(void)
 		  			  trx_writereg(CHIP_TX, 0x2F0C, (freq_word>>16)&0xFF);
 		  			  trx_writereg(CHIP_TX, 0x2F0D, (freq_word>>8)&0xFF);
 		  			  trx_writereg(CHIP_TX, 0x2F0E, freq_word&0xFF);
-		  			  trx_writecmd(CHIP_TX, STR_SCAL);
+		  			  trx_writecmd(CHIP_TX, STR_STX);
 		  			  HAL_Delay(20);
-		  			  if(trx_readreg(CHIP_TX, STR_SNOP)>>4==STATE_IDLE) //PLL locked and state=IDLE?
+		  			  if(trx_readreg(CHIP_TX, STR_SNOP)>>4==STATE_TX) //PLL locked and state=TX?
 		  				  interface_resp(CMD_SET_TX_FREQ, ERR_OK); //OK
 		  			  else
 		  				  interface_resp(CMD_SET_TX_FREQ, ERR_TX_PLL); //PLL lock error
@@ -1041,7 +1037,7 @@ int main(void)
 				  sprintf((char*)&ident[3], IDENT_STR);
 				  ident[0]=CMD_GET_IDENT;
 				  *((uint16_t*)&ident[1])=strlen((char*)IDENT_STR)+3; //total length
-				  HAL_UART_Transmit_IT(&huart1, ident, *((uint16_t*)&ident[1]));
+				  HAL_UART_Transmit_DMA(&huart1, ident, *((uint16_t*)&ident[1]));
 			  break;
 
 		  	  case CMD_GET_CAPS:
@@ -1056,7 +1052,7 @@ int main(void)
 		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
 		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_RX].frequency, sizeof(uint32_t));
 		  		  memset(&resp[7], 0, 4); //MSB to 0
-		  		  HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
+		  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
 		  	  case CMD_GET_TX_FREQ:
@@ -1065,7 +1061,7 @@ int main(void)
 		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
 		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
 		  		  memset(&resp[7], 0, 4); //MSB to 0
-		  		  HAL_UART_Transmit_IT(&huart1, resp, *((uint16_t*)&resp[1]));
+		  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
 		  	  case 0x20:
@@ -1077,14 +1073,14 @@ int main(void)
 		  	  break;
 		  }
 	  }
-	  else if(interface_comm==COMM_TOT || interface_comm==COMM_OVF)
+	  /*else if(interface_comm==COMM_TOT || interface_comm==COMM_OVF)
 	  {
 		  HAL_TIM_Base_Stop_IT(&htim6);
 		  HAL_UART_AbortReceive_IT(&huart1);
 		  rx_bc=0;
 		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
 		  interface_comm=COMM_IDLE;
-	  }
+	  }*/
 
 	  //baseband transmission complete
 	  if(bsb_tx_cplt)
@@ -1113,16 +1109,16 @@ int main(void)
 	  //rx baseband buffer ready to be sent over UART
 	  if(rx_bsb_buff_rdy)
 	  {
-		  uint32_t len=BSB_RX_BUFLEN/2+3;
-		  uint8_t h_buff[BSB_RX_BUFLEN/2+3]={CMD_STREAM_DATA, len&0xFF, len>>8};
+		  //make global?
+		  volatile static uint8_t h_buff[BSB_RX_BUFLEN/2+3]={CMD_STREAM_DATA, (BSB_RX_BUFLEN/2+3)&0xFF, (BSB_RX_BUFLEN/2+3)>>8};
 
 		  if(rx_bsb_buff_rdy==1)
 		  {
 			  //debug
 			  //set_TP(TP1, 1);
 
-			  memcpy(&h_buff[3], (uint8_t*)&rx_bsb_buff[0], BSB_RX_BUFLEN/2);
-			  HAL_UART_Transmit_IT(&huart1, h_buff, len);
+			  memcpy((uint8_t*)&h_buff[3], (uint8_t*)&rx_bsb_buff[0], BSB_RX_BUFLEN/2);
+			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, BSB_RX_BUFLEN/2+3);
 
 			  //debug
 			  //set_TP(TP1, 0);
@@ -1132,8 +1128,8 @@ int main(void)
 			  //debug
 			  //set_TP(TP2, 1);
 
-			  memcpy(&h_buff[3], (uint8_t*)&rx_bsb_buff[BSB_RX_BUFLEN/2], BSB_RX_BUFLEN/2);
-			  HAL_UART_Transmit_IT(&huart1, h_buff, len);
+			  memcpy((uint8_t*)&h_buff[3], (uint8_t*)&rx_bsb_buff[BSB_RX_BUFLEN/2], BSB_RX_BUFLEN/2);
+			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, BSB_RX_BUFLEN/2+3);
 
 			  //debug
 			  //set_TP(TP2, 0);
@@ -1465,6 +1461,12 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
+  /* DMA2_Stream7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
 
 }
 

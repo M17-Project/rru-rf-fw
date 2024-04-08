@@ -51,7 +51,8 @@ enum interface_comm_t
 	COMM_IDLE,
 	COMM_RDY,
 	COMM_TOT,
-	COMM_OVF
+	COMM_OVF,
+	COMM_NEXT
 };
 
 enum err_t
