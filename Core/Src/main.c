@@ -1096,7 +1096,7 @@ int main(void)
 
 		  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency deviation at TX idle
 		  set_rf_pwr_setpoint(0);
-		  HAL_Delay(50);
+		  //HAL_Delay(50);
 		  rf_pa_en(0);
 		  //trx_data[CHIP_TX].pwr=3; //set tx cc2100 power to the minimum at TX idle
 		  //trx_writereg(CHIP_TX, 0x002B, 3);
