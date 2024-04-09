@@ -683,13 +683,14 @@ int main(void)
   trx_data[CHIP_TX].frequency=435000000;
   trx_data[CHIP_RX].fcorr=0;
   trx_data[CHIP_TX].fcorr=0;
-  trx_data[CHIP_TX].pwr=63;								//3 to 63, TODO: set to 3
+  trx_data[CHIP_TX].pwr=63;								//3 to 63
   tx_dbm=30.00f;										//30dBm (1W) default
   alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
 
   dbg_print(0, "Starting TRX config...");
   config_rf(CHIP_RX, trx_data[CHIP_RX]);
   config_rf(CHIP_TX, trx_data[CHIP_TX]);
+  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency deviation at TX idle
   dbg_print(TERM_GREEN, " done\n");
 
   HAL_Delay(50);
@@ -1023,7 +1024,10 @@ int main(void)
 		  		  tx_bsb_total_cnt+=len;
 		  		  if(tx_bsb_total_cnt>=BSB_TX_THRESH && tx_state==TX_IDLE)
 		  		  {
-		  			  ; //TODO: set tx CC1200 power to max
+		  			  //set tx CC1200 power to max and frequency deviation to zero
+		  			  //trx_data[CHIP_TX].pwr=63;
+		  			  //trx_writereg(CHIP_TX, 0x002B, 63);
+		  			  trx_writereg(CHIP_TX, 0x2F7E, 0);
 		  			  set_rf_pwr_setpoint(alc_set);
 		  			  rf_pa_en(1);
 		  			  tx_state=TX_ACTIVE;
@@ -1090,10 +1094,12 @@ int main(void)
 
 		  //interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
 
-		  ; //TODO: set tx cc2100 power to the minimum at TX idle
+		  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency deviation at TX idle
 		  set_rf_pwr_setpoint(0);
 		  HAL_Delay(50);
 		  rf_pa_en(0);
+		  //trx_data[CHIP_TX].pwr=3; //set tx cc2100 power to the minimum at TX idle
+		  //trx_writereg(CHIP_TX, 0x002B, 3);
 
 		  tx_state=TX_IDLE;
 		  tx_bsb_cnt=0;
