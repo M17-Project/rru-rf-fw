@@ -963,7 +963,7 @@ int main(void)
 		  		  trx_data[CHIP_RX].fcorr=roundf((trx_data[CHIP_RX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
 		  		  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
 		  		  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
-		  		  dbg_print(0, "[INTRFC_CMD] RX frequency correction: %d\n", *((int16_t*)&rxb[3]));
+		  		  dbg_print(0, "[INTRFC_CMD] RX frequency correction: %3.1f ppm (%d)\n", *((float*)&rxb[3]), trx_data[CHIP_RX].fcorr);
 		  		  interface_resp(CMD_SET_RX_FREQ_CORR, ERR_OK); //OK
 			  break;
 
@@ -971,7 +971,7 @@ int main(void)
 		  		  trx_data[CHIP_TX].fcorr=roundf((trx_data[CHIP_TX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
 		  		  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
 		  		  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
-		  		  dbg_print(0, "[INTRFC_CMD] TX frequency correction: %d\n", *((int16_t*)&rxb[3]));
+		  		  dbg_print(0, "[INTRFC_CMD] TX frequency correction: %3.1f ppm (%d)\n", *((float*)&rxb[3]), trx_data[CHIP_TX].fcorr);
 		  		  interface_resp(CMD_SET_TX_FREQ_CORR, ERR_OK); //OK
 			  break;
 
