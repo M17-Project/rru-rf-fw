@@ -33,7 +33,8 @@ enum cari_cmd_t
 	CMD_GET_RX_FREQ,
 	CMD_GET_TX_FREQ,
 	CMD_GET_TX_POWER,
-	CMD_GET_FREQ_CORR
+	CMD_GET_FREQ_CORR,
+	CMD_GET_MEAS
 };
 
 enum cari_err_t

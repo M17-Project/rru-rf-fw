@@ -68,6 +68,7 @@ UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart1_tx;
 DMA_HandleTypeDef hdma_usart1_rx;
 
+DMA_HandleTypeDef hdma_memtomem_dma2_stream1;
 /* USER CODE BEGIN PV */
 #include "enums.h"
 
@@ -96,6 +97,7 @@ volatile uint32_t tx_bsb_cnt=0;								//how many samples were transmitted
 volatile uint32_t rx_bsb_cnt=0;								//how many samples were received (from CC1200)
 volatile uint8_t rx_bsb_buff_rdy=0;							//which part of rx_bsb_buff is ready to be sent out (0-none)
 volatile uint8_t bsb_tx_cplt=0;								//baseband transmission over RF complete?
+volatile uint8_t meas_req=0;								//measurement request received?
 
 volatile enum trx_state_t tx_state=TX_IDLE;					//transmitter state
 volatile enum trx_state_t rx_state=RX_IDLE;					//receiver state
@@ -182,7 +184,7 @@ void get_adc_vals(float* pwr_fwd, float* pwr_ref, float* temp)
 
 //set rf power output setpoint
 //0 - lowest power, 0xFFF - max power
-void set_rf_pwr_setpoint(uint16_t pwr)
+void set_rf_pwr_setpoint(const uint16_t pwr)
 {
 	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFF:pwr);
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
@@ -508,7 +510,11 @@ void config_rf(enum trx_t trx, struct trx_data_t trx_data)
 
 void interface_resp(enum cari_cmd_t cmd, const uint8_t resp)
 {
-	uint8_t tmp[4]={cmd, 4, 0, resp};
+	static uint8_t tmp[4]={0,0,0,0};
+	tmp[0]=cmd;
+	tmp[1]=4;
+	tmp[2]=0;
+	tmp[3]=resp;
 	HAL_UART_Transmit_DMA(&huart1, tmp, 4);
 }
 
@@ -532,9 +538,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin==TX_TRIG_Pin)
 	{
+		set_TP(TP1, 1);
 		if(rx_state==RX_ACTIVE)
 		{
-			set_TP(TP1, 1);
+			//set_TP(TP1, 1);
 			rx_bsb_buff[rx_bsb_cnt]=trx_readreg(CHIP_RX, 0x2F7D);
 			rx_bsb_cnt++;
 
@@ -547,13 +554,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 			{
 				rx_bsb_buff_rdy=1;
 			}
-			set_TP(TP1, 0);
+			//set_TP(TP1, 0);
 		}
 
 		if(tx_state==TX_ACTIVE)
 		{
-			set_TP(TP2, 1);
-			//write single byte
+			//set_TP(TP2, 1);
 			if(bsb_tx_cplt==0)
 			{
 				trx_writereg(CHIP_TX, 0x2F7E, tx_bsb_buff[tx_bsb_cnt%BSB_TX_BUFLEN]);
@@ -562,8 +568,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 				if(tx_bsb_cnt>=tx_bsb_total_cnt)
 					bsb_tx_cplt=1;
 			}
-			set_TP(TP2, 0);
+			//set_TP(TP2, 0);
 		}
+		set_TP(TP1, 0);
 	}
 }
 
@@ -601,9 +608,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 			HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
 			interface_comm=COMM_RDY;
 		}
-		else
+		else if(interface_comm==COMM_IDLE)
 		{
-			if(rxb[0]==CMD_PING || rxb[0]>=CMD_GET_IDENT)
+			if((rxb[0]==CMD_PING || rxb[0]>=CMD_GET_IDENT) && rxb[1]==3)
 			{
 				HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
 				interface_comm=COMM_RDY;
@@ -866,17 +873,11 @@ int main(void)
   {
 	  if(interface_comm==COMM_RDY) //if a valid interface frame is detected
 	  {
-		  //set_TP(TP1, 1);
-		  //HAL_UART_AbortReceive_IT(&huart1);
-		  //HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
-		  interface_comm=COMM_IDLE;
-		  //set_TP(TP1, 0);
-
 		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[0], rxb[1]);
 
 		  uint32_t freq;
-		  uint8_t ident[128]={0};
-		  uint8_t resp[15]; //response buffer
+		  static uint8_t ident[128];
+		  static uint8_t resp[15]; //response buffer
 
 		  switch(rxb[0])
 		  {
@@ -1020,14 +1021,21 @@ int main(void)
 		  	  case CMD_STREAM_DATA:
 		  		  //dbg_print(0, "[INTRFC_CMD] Stream data received (%d bytes)\n", *((uint16_t*)&rxb[1]));
 		  		  uint32_t len=*((uint16_t*)&rxb[1])-3;
-		  		  memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_TX_BUFLEN], (uint8_t*)&rxb[3], len);
+		  		  //if((tx_bsb_total_cnt%BSB_TX_BUFLEN)+len<=BSB_TX_BUFLEN)
+		  			  memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_TX_BUFLEN], (uint8_t*)&rxb[3], len);
+		  		  //else
+		  		  //{
+		  			  //uint32_t left=(tx_bsb_total_cnt%BSB_TX_BUFLEN)+len-BSB_TX_BUFLEN;
+		  			  //memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_TX_BUFLEN], (uint8_t*)&rxb[3], len-left);
+		  			  //memcpy((uint8_t*)tx_bsb_buff, (uint8_t*)&rxb[3+len-left], left);
+		  		  //}
 		  		  tx_bsb_total_cnt+=len;
 		  		  if(tx_bsb_total_cnt>=BSB_TX_THRESH && tx_state==TX_IDLE)
 		  		  {
 		  			  //set tx CC1200 power to max and frequency deviation to zero
 		  			  //trx_data[CHIP_TX].pwr=63;
 		  			  //trx_writereg(CHIP_TX, 0x002B, 63);
-		  			  trx_writereg(CHIP_TX, 0x2F7E, 0);
+		  			  //trx_writereg(CHIP_TX, 0x2F7E, 0);
 		  			  set_rf_pwr_setpoint(alc_set);
 		  			  rf_pa_en(1);
 		  			  tx_state=TX_ACTIVE;
@@ -1068,6 +1076,11 @@ int main(void)
 		  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
 			  break;
 
+		  	  case CMD_GET_MEAS:
+		  		  //dbg_print(0, "[INTRFC_CMD] GET_TX_FREQ\n");
+		  		  meas_req=1; //set request flag, process when ready (UART not busy)
+			  break;
+
 		  	  case 0x20:
 		  		  ;//set_rf_pwr_setpoint(0);
 			  break;
@@ -1076,6 +1089,8 @@ int main(void)
 		  		  ;
 		  	  break;
 		  }
+
+		  interface_comm=COMM_IDLE;
 	  }
 	  /*else if(interface_comm==COMM_TOT || interface_comm==COMM_OVF)
 	  {
@@ -1116,7 +1131,9 @@ int main(void)
 	  if(rx_bsb_buff_rdy)
 	  {
 		  //make global?
-		  volatile static uint8_t h_buff[BSB_RX_BUFLEN/2+3]={CMD_STREAM_DATA, (BSB_RX_BUFLEN/2+3)&0xFF, (BSB_RX_BUFLEN/2+3)>>8};
+		  volatile static uint8_t h_buff[3+BSB_RX_BUFLEN/2]={CMD_STREAM_DATA, (BSB_RX_BUFLEN/2+3)&0xFF, (BSB_RX_BUFLEN/2+3)>>8};
+
+		  while(huart1.gState==HAL_UART_STATE_BUSY_TX); //wait while busy
 
 		  if(rx_bsb_buff_rdy==1)
 		  {
@@ -1124,7 +1141,7 @@ int main(void)
 			  //set_TP(TP1, 1);
 
 			  memcpy((uint8_t*)&h_buff[3], (uint8_t*)&rx_bsb_buff[0], BSB_RX_BUFLEN/2);
-			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, BSB_RX_BUFLEN/2+3);
+			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, 3+BSB_RX_BUFLEN/2);
 
 			  //debug
 			  //set_TP(TP1, 0);
@@ -1135,13 +1152,26 @@ int main(void)
 			  //set_TP(TP2, 1);
 
 			  memcpy((uint8_t*)&h_buff[3], (uint8_t*)&rx_bsb_buff[BSB_RX_BUFLEN/2], BSB_RX_BUFLEN/2);
-			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, BSB_RX_BUFLEN/2+3);
+			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, 3+BSB_RX_BUFLEN/2);
 
 			  //debug
 			  //set_TP(TP2, 0);
 		  }
 
 		  rx_bsb_buff_rdy=0;
+	  }
+
+	  if(meas_req==1 && huart1.gState!=HAL_UART_STATE_BUSY_TX)
+	  {
+		  //process pending stuff
+		  static uint8_t resp[6];
+  		  resp[0]=CMD_GET_MEAS;
+  		  *((uint16_t*)&resp[1])=3+3;
+  		  resp[3]=0x01;
+  		  resp[4]=0x02;
+  		  resp[5]=0x03;
+  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
+		  meas_req=0;
 	  }
     /* USER CODE END WHILE */
 
@@ -1456,6 +1486,8 @@ static void MX_USART3_UART_Init(void)
 
 /**
   * Enable DMA controller clock
+  * Configure DMA for memory to memory transfers
+  *   hdma_memtomem_dma2_stream1
   */
 static void MX_DMA_Init(void)
 {
@@ -1463,15 +1495,34 @@ static void MX_DMA_Init(void)
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
 
+  /* Configure DMA request hdma_memtomem_dma2_stream1 on DMA2_Stream1 */
+  hdma_memtomem_dma2_stream1.Instance = DMA2_Stream1;
+  hdma_memtomem_dma2_stream1.Init.Channel = DMA_CHANNEL_0;
+  hdma_memtomem_dma2_stream1.Init.Direction = DMA_MEMORY_TO_MEMORY;
+  hdma_memtomem_dma2_stream1.Init.PeriphInc = DMA_PINC_ENABLE;
+  hdma_memtomem_dma2_stream1.Init.MemInc = DMA_MINC_ENABLE;
+  hdma_memtomem_dma2_stream1.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+  hdma_memtomem_dma2_stream1.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+  hdma_memtomem_dma2_stream1.Init.Mode = DMA_NORMAL;
+  hdma_memtomem_dma2_stream1.Init.Priority = DMA_PRIORITY_LOW;
+  hdma_memtomem_dma2_stream1.Init.FIFOMode = DMA_FIFOMODE_ENABLE;
+  hdma_memtomem_dma2_stream1.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_FULL;
+  hdma_memtomem_dma2_stream1.Init.MemBurst = DMA_MBURST_SINGLE;
+  hdma_memtomem_dma2_stream1.Init.PeriphBurst = DMA_PBURST_SINGLE;
+  if (HAL_DMA_Init(&hdma_memtomem_dma2_stream1) != HAL_OK)
+  {
+    Error_Handler( );
+  }
+
   /* DMA interrupt init */
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
   /* DMA2_Stream2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
   /* DMA2_Stream7_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
 
 }
@@ -1535,8 +1586,10 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  DBG_TP2_GPIO_Port->BSRR=(uint32_t)DBG_TP2_Pin;
   while (1)
   {
+	  ;
   }
   /* USER CODE END Error_Handler_Debug */
 }
