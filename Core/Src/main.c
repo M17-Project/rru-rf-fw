@@ -25,8 +25,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include "cc1200.h"
 #include "term.h"
 #include "interface_cmds.h"
+#include "enums.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,15 +38,18 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define DBG_MSGS									//enable debug messages over DBG_UART
-#define IDENT_STR		"Remote Radio Unit (RRU) 420-450 MHz\nFW v1.0.0 by Wojciech SP5WWP"
-#define VDDA			(3.24f)						//measured VDDA voltage
-#define CC1200_REG_NUM	51							//number of regs used to initialize CC1200s
-#define BSB_TX_BUFLEN	(6*960U)					//tx buffer size in samples (240ms at fs=24kHz)
-#define BSB_TX_THRESH	(2*960U)					//80ms worth of baseband data (at 24kHz)
-#define BSB_RX_BUFLEN	(2*960U)					//how many samples do we need to collect before sending them over CARI?
+#define IDENT_STR			"Remote Radio Unit (RRU) 420-450 MHz\nFW v2.0.0 by Wojciech SP5WWP"
 
-#define FCORR_STEP		(40.0e6f/262144.0f/8.0f)	//unit value for frequency correction
+#define DBG_MSGS											//enable debug messages over DBG_UART
+#define VDDA					3.24f						//measured VDDA voltage
+#define CC1200_REG_NUM			51							//number of regs used to initialize CC1200s
+#define FCORR_STEP				(40.0e6f/262144.0f/8.0f)	//unit value for frequency correction (262144=2^18)
+#define UART_LONG_BUF_SIZE		1024
+#define UART_SHORT_BUF_SIZE		128							//buffer length for UART
+#define SHORT_TXQ_SIZE			8							//TX queue length (short messages)
+#define LONG_TXQ_SIZE   		2							//TX queue length (baseband transfers)
+#define BSB_SIZE				960							//size of baseband chunks
+#define BSB_TX_BUFF_SIZE		(10*BSB_SIZE)				//large buffer for baseband
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -62,50 +67,47 @@ DAC_HandleTypeDef hdac;
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim6;
+TIM_HandleTypeDef htim8;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart1_tx;
 DMA_HandleTypeDef hdma_usart1_rx;
+DMA_HandleTypeDef hdma_usart3_tx;
 
 DMA_HandleTypeDef hdma_memtomem_dma2_stream1;
 /* USER CODE BEGIN PV */
-#include "enums.h"
+//aliases
+UART_HandleTypeDef *ctrl_uart = &huart1;
+UART_HandleTypeDef *dbg_uart = &huart3;
+TIM_HandleTypeDef *ctrl_uart_tot = &htim6;
+TIM_HandleTypeDef *adc_timebase = &htim8;
 
-uint32_t dev_err=(uint32_t)ERR_OK;	//default state - no error
-
-struct trx_data_t
+//errors
+const char *errstrings[5] =
 {
-	uint8_t name[20];		//chip's name (CC1200, CC1201, unknown ID)
-	uint32_t frequency;		//frequency in hertz
-	uint8_t pwr;			//power setting (3..63)
-	int16_t fcorr;			//frequency correction
-	uint8_t pll_locked;		//PLL locked flag
-}trx_data[2];
+	"OK",
+	"RX PLL did not lock",
+	"TX PLL did not lock",
+	"RX SPI communication error",
+	"TX SPI communication error"
+};
 
-//PA
-uint16_t alc_set=0;											//automatic level control setting (nonlinear)
-float tx_dbm=0.0f;											//RF power setpoint, dBm
 
-//buffers and interface stuff
-volatile uint8_t rxb[1000]={0};								//rx buffer for interface data
-volatile uint32_t rx_bc=0;									//UART1 rx byte counter
-volatile int8_t tx_bsb_buff[BSB_TX_BUFLEN]={0};				//buffer for transmission
-volatile int8_t rx_bsb_buff[BSB_RX_BUFLEN]={0};				//buffer for reception
-volatile uint32_t tx_bsb_total_cnt=0;						//how many samples were received (over CARI)
-volatile uint32_t tx_bsb_cnt=0;								//how many samples were transmitted
-volatile uint32_t rx_bsb_cnt=0;								//how many samples were received (from CC1200)
-volatile uint8_t rx_bsb_buff_rdy=0;							//which part of rx_bsb_buff is ready to be sent out (0-none)
-volatile uint8_t bsb_tx_cplt=0;								//baseband transmission over RF complete?
-volatile uint8_t meas_req=0;								//measurement request received?
+//settings
+struct rru_settings_t
+{
+	uint32_t tx_freq;
+	uint32_t rx_freq;
+	float tx_pwr_dbm;
+} rru_settings;
 
-volatile enum trx_state_t tx_state=TX_IDLE;					//transmitter state
-volatile enum trx_state_t rx_state=RX_IDLE;					//receiver state
-volatile uint8_t bsb_trig=0;								//24kHz baseband trigger signal
-volatile enum interface_comm_t interface_comm=COMM_IDLE;	//interface comm status
+trx_data_t trx_data[2];
+
+uint32_t dev_err; //default state - no error
 
 //ADC stuff
-uint32_t adc_vals[3]={0};									//raw values read from ADC channels 0, 1, and 2
+volatile uint16_t adc_vals[3]; //raw values read from ADC channels 0, 1, and 2
 
 //AD8318 RF power sensor cal data (consts for now)
 //based on 2-point linear approximation
@@ -117,6 +119,48 @@ const float cal_a		= -41.3223140495868f;	//dBm/V
 const float cal_b		=  26.4462809917355f;	//dBm
 const float cal_offs	=  62.5f;				//dB
 const float cal_corr	=  -3.6f;				//dB
+
+//UART control and baseband transfer
+volatile uint8_t uart_ctrl_rx_buf[UART_LONG_BUF_SIZE];	//DMA UART RX buffer
+volatile uint16_t uart_ctrl_rx_buf_tail;
+enum uart_ctrl_state_t uart_ctrl_state = WAIT_ID;		//idle state
+
+uint8_t cmd_id;
+uint16_t cmd_len;
+uint16_t payload_pos;
+uint8_t payload[1024];
+
+typedef struct											//TX queue - short packets
+{
+	uint8_t  data[UART_SHORT_BUF_SIZE];
+	uint16_t len;
+} txq_queue_t;
+
+txq_queue_t txq[SHORT_TXQ_SIZE];						//TX queue - short packets
+
+volatile uint8_t txq_head;
+volatile uint8_t txq_tail;
+volatile uint8_t txq_busy;   							//ongoing DMA transfer?
+
+typedef struct											//TX queue - long packets
+{
+    uint8_t data[UART_LONG_BUF_SIZE];
+    uint16_t len;
+} bsbq_queue_t;
+
+bsbq_queue_t bsbq[LONG_TXQ_SIZE];						//TX queue - long packets
+
+volatile uint8_t bsbq_head;
+volatile uint8_t bsbq_tail;
+volatile uint8_t bsbq_busy;
+
+uint8_t bsb_rx[2*BSB_SIZE];								//rx samples
+volatile uint8_t rx_pend;								//pending rx sample read?
+uint16_t rx_num_wr;
+
+uint8_t circ_bsb_tx_buff[BSB_TX_BUFF_SIZE];
+volatile uint16_t circ_bsb_buff_tail;
+volatile uint16_t circ_bsb_buff_head;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -129,6 +173,7 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_TIM8_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -147,6 +192,7 @@ void dbg_print(const char* color_code, const char* fmt, ...)
 
 	if(color_code!=NULL)
 	{
+		//TODO: replace this with queued DMA
 		HAL_UART_Transmit(&huart3, (uint8_t*)color_code, strlen(color_code), 10);
 		HAL_UART_Transmit(&huart3, (uint8_t*)str, strlen(str), 100);
 		HAL_UART_Transmit(&huart3, (uint8_t*)TERM_DEFAULT, strlen(TERM_DEFAULT), 10);
@@ -160,26 +206,17 @@ void dbg_print(const char* color_code, const char* fmt, ...)
 
 uint16_t dbm_to_alc(float dbm)
 {
-	return roundf(43.8033381164565f*dbm+564.564609923722f);
+	//TODO: magic numbers
+	return roundf(43.8033381164565f*dbm + 564.564609923722f);
 }
 
 //get RF power in dBm
 //and temperature in degs C, based on LMT87's output voltage
-void get_adc_vals(float* pwr_fwd, float* pwr_ref, float* temp)
+void get_meas_vals(float* pwr_fwd, float* pwr_ref, float* temp)
 {
-	uint32_t values[3];
-	HAL_ADC_Start_DMA(&hadc1, values, 3);
-	HAL_ADC_PollForConversion(&hadc1, 20);
-
-	float u=values[2]/4096.0f*VDDA;
-	HAL_Delay(1); //TODO: why is this delay needed to make this func work?
-
-	//dbg_print(TERM_YELLOW, "[DBG] %ld, %ld, %ld\n", values[0], values[1], values[2]);
-	//dbg_print(TERM_YELLOW, "[DBG] %1.4f\n", u);
-
-	*pwr_fwd=cal_a*(values[0]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr; //take coupling and attenuation into account
-	*pwr_ref=cal_a*(values[1]/4096.0f*VDDA)+cal_b + cal_offs+cal_corr;
-	*temp=(-13.582f+sqrtf(184.470724f+0.01732f*(2.2308f-u)*1000.0f))/0.00866f + 30.0f;
+	*pwr_fwd = cal_a * (adc_vals[0]/4096.0f*VDDA) + cal_b + cal_offs+cal_corr; //take coupling and attenuation into account
+	*pwr_ref = cal_a * (adc_vals[1]/4096.0f*VDDA) + cal_b + cal_offs+cal_corr;
+	*temp = (-13.582f+sqrtf(184.470724f+0.01732f*(2.2308f-(adc_vals[2]/4096.0f*VDDA))*1000.0f))/0.00866f + 30.0f;
 }
 
 //set rf power output setpoint
@@ -202,17 +239,16 @@ float calc_swr(float fwd, float ref)
 {
 	//in an ideal world this would be physically impossible
 	//but there's always some measurement error that could cause this
-	if(ref>=fwd)
+	if(ref >= fwd)
 		return INFINITY;
 
 	//dBm to watts
-	fwd=powf(10.0f, fwd/10.0f-3.0f);
-	ref=powf(10.0f, ref/10.0f-3.0f);
+	fwd = powf(10.0f, fwd/10.0f - 3.0f);
+	ref = powf(10.0f, ref/10.0f - 3.0f);
 
-	float s=sqrtf(ref/fwd);
-	float swr=(1.0f+s)/(1.0f-s);
+	float s = sqrtf(ref/fwd);
 
-	return swr;
+	return (1.0f+s)/(1.0f-s);
 }
 
 //enable RF PA (assert one of two enable signals)
@@ -242,280 +278,574 @@ void set_TP(enum tp_t tp, uint8_t state)
 	}
 }
 
-void set_CS(enum trx_t trx, uint8_t state)
+void set_uart_ctrl_timeout(uint8_t ms)
 {
-	if(trx==CHIP_RX)
+	ctrl_uart_tot->Instance->ARR = (uint32_t)ms*10 - 1;
+}
+
+void platform_init(void)
+{
+	//enable FPU
+	#if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
+	SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));  /* set CP10 and CP11 Full Access */
+	#endif
+
+	//default settings
+	set_rf_pwr_setpoint(0);
+	set_dac_ch2(0); //can be used for debugging
+	rf_pa_en(0);
+	trx_set_CS(CHIP_RX, 1);
+	trx_set_CS(CHIP_TX, 1);
+	set_TP(TP1, 0);
+	set_TP(TP2, 0);
+
+	HAL_Delay(100);
+	trx_write_cmd(CHIP_RX, STR_SRES);
+	trx_write_cmd(CHIP_TX, STR_IDLE);
+	dbg_print(0, TERM_CLR); //clear console and print out ident string
+	dbg_print(TERM_GREEN, IDENT_STR); dbg_print(0,  "\n");
+
+	HAL_Delay(10);
+	trx_detect(CHIP_RX, trx_data[CHIP_RX].name);
+	trx_detect(CHIP_TX, trx_data[CHIP_TX].name);
+	dbg_print(0, "RX IC: %s\nTX IC: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
+
+	trx_data[CHIP_RX].freq = 433475000;							//default
+	trx_data[CHIP_TX].freq = 435000000;
+	trx_data[CHIP_RX].fcorr = 0;
+	trx_data[CHIP_TX].fcorr = 0;
+	trx_data[CHIP_TX].pwr = 63;									//3 to 63
+	rru_settings.tx_pwr_dbm = 30.00f;							//30dBm (1W) default
+	set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));	//set the DAC for RF power setpoint
+
+	dbg_print(0, "Starting TRX config...");
+	trx_config(CHIP_RX, trx_data[CHIP_RX]);
+	trx_config(CHIP_TX, trx_data[CHIP_TX]);
+	trx_write_reg(CHIP_TX, 0x2F7E, 0); //zero frequency deviation at TX idle
+	dbg_print(TERM_GREEN, " done\n");
+
+	HAL_Delay(50);
+	trx_write_cmd(CHIP_RX, STR_SCAL);
+	trx_write_cmd(CHIP_TX, STR_SCAL);
+
+	HAL_Delay(50);
+	trx_data[CHIP_RX].pll_locked = ((trx_read_reg(CHIP_RX, 0x2F8D)^0x80)&0x81)==0x81; //FSCAL_CTRL=1 and FSCAL_CTRL_NOT_USED=0
+	trx_data[CHIP_TX].pll_locked = ((trx_read_reg(CHIP_TX, 0x2F8D)^0x80)&0x81)==0x81;
+	dbg_print(0, "RX PLL");
+	trx_data[CHIP_RX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+	dbg_print(0, "TX PLL");
+	trx_data[CHIP_TX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
+
+	if(!trx_data[CHIP_RX].pll_locked)
 	{
-		if(state)
-			RX_nCS_GPIO_Port->BSRR=(uint32_t)RX_nCS_Pin;
-		else
-			RX_nCS_GPIO_Port->BSRR=(uint32_t)RX_nCS_Pin<<16;
+		dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_RX_PLL, errstrings[ERR_RX_PLL]);
+		dev_err|=(1UL<<ERR_RX_PLL);
 	}
-	else if(trx==CHIP_TX)
+	if(!trx_data[CHIP_TX].pll_locked)
 	{
-		if(state)
-			TX_nCS_GPIO_Port->BSRR=(uint32_t)TX_nCS_Pin;
-		else
-			TX_nCS_GPIO_Port->BSRR=(uint32_t)TX_nCS_Pin<<16;
+		dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_PLL, errstrings[ERR_TX_PLL]);
+		dev_err|=(1UL<<ERR_TX_PLL);
+	}
+	if(strstr((char*)trx_data[CHIP_RX].name, "unknown")!=NULL)
+	{
+		dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_RX_SPI, errstrings[ERR_RX_SPI]);
+		dev_err|=(1UL<<ERR_RX_SPI);
+	}
+	if(strstr((char*)trx_data[CHIP_TX].name, "unknown")!=NULL)
+	{
+		dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_SPI, errstrings[ERR_TX_SPI]);
+		dev_err|=(1UL<<ERR_TX_SPI);
+	}
+
+	trx_write_cmd(CHIP_RX, STR_SRX);
+	trx_write_cmd(CHIP_TX, STR_STX);
+
+	//dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_read_reg(CHIP_TX, STR_SNOP)>>4);
+	//dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
+
+	//start ADC conversions
+	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_vals, 3);
+	HAL_TIM_Base_Start(adc_timebase);
+
+	//enable interface comms over UART1
+	set_uart_ctrl_timeout(10); //10ms timeout
+	HAL_UART_Receive_DMA(ctrl_uart, (uint8_t*)uart_ctrl_rx_buf, sizeof(uart_ctrl_rx_buf));
+}
+
+uint16_t uart_ctrl_data_avbl(void)
+{
+    uint16_t head = UART_LONG_BUF_SIZE - __HAL_DMA_GET_COUNTER(ctrl_uart->hdmarx);
+
+    if (head >= uart_ctrl_rx_buf_tail)
+        return head - uart_ctrl_rx_buf_tail;
+    else
+        return UART_LONG_BUF_SIZE - uart_ctrl_rx_buf_tail + head;
+}
+
+int uart_ctrl_get_byte(uint8_t *b)
+{
+    if (uart_ctrl_data_avbl() == 0)
+        return 0;
+
+    *b = uart_ctrl_rx_buf[uart_ctrl_rx_buf_tail];
+    uart_ctrl_rx_buf_tail = (uart_ctrl_rx_buf_tail + 1) % UART_LONG_BUF_SIZE;
+
+    //start the timeout timer when the data is detected, not when it arrives
+    FIX_TIMER_TRIGGER(ctrl_uart_tot);
+    ctrl_uart_tot->Instance->CNT = 0;
+    HAL_TIM_Base_Start_IT(ctrl_uart_tot);
+
+    return 1;
+}
+
+void interface_resp_short(uint8_t cid, const uint8_t *resp, uint16_t pld_len)
+{
+	uint16_t len = pld_len + 3;
+
+	//drop oversized
+    if (len > UART_SHORT_BUF_SIZE)
+    	return;
+
+    //next queue entry
+    uint8_t next = (txq_head+1) % SHORT_TXQ_SIZE;
+
+    //queue full, drop packet
+    if (next == txq_tail)
+    	return;
+
+    txq[txq_head].data[0] = cid;
+    memcpy(&txq[txq_head].data[1], (uint8_t*)&len, sizeof(uint16_t));
+    memcpy(&txq[txq_head].data[3], resp, pld_len);
+    txq[txq_head].len = len;
+    txq_head = next;
+
+    //if UART TX is idle, start transmission
+    if (!txq_busy && !bsbq_busy)
+    {
+        txq_busy = 1;
+        HAL_UART_Transmit_DMA(ctrl_uart, txq[txq_tail].data, txq[txq_tail].len);
+    }
+}
+
+/*void interface_resp_long(enum cmd_t cid, const uint8_t *resp, uint16_t pld_len)
+{
+	uint16_t len = pld_len+3;
+
+	//drop oversized
+    if (len > UART_LONG_BUF_SIZE)
+    	return;
+
+    //next queue entry
+    uint8_t next = (bsbq_head+1) % LONG_TXQ_SIZE;
+
+    //queue full, drop packet
+    if (next == bsbq_tail)
+    	return;
+
+    bsbq[bsbq_head].data[0] = cid;
+    memcpy(&bsbq[bsbq_head].data[1], (uint8_t*)&len, sizeof(uint16_t));
+    memcpy(&bsbq[bsbq_head].data[3], resp, pld_len);
+    bsbq[bsbq_head].len = len;
+    bsbq_head = next;
+
+    //if UART TX is idle, start transmission
+    if (!txq_busy && !bsbq_busy)
+    {
+    	bsbq_busy = 1;
+        HAL_UART_Transmit_DMA(&huart1, bsbq[bsbq_tail].data, bsbq[bsbq_tail].len);
+    }
+}*/
+
+/*void interface_resp_byte(enum cmd_t cmd, uint8_t resp)
+{
+	//single-byte response (4 bytes total)
+	interface_resp_short(cmd, &resp, 1);
+}*/
+
+void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
+{
+	switch (cid)
+	{
+		case CMD_PING:
+			interface_resp_short(cid, (uint8_t*)&dev_err, sizeof(dev_err));
+		break;
+
+/*		case CMD_SET_RX_FREQ:
+			if (pld_len == sizeof(uint32_t))
+			{
+				memcpy((uint8_t*)&u32_val, pld, sizeof(uint32_t));
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_CMD_MALFORM);
+				break;
+			}
+
+			if(u32_val>=420e6 && u32_val<=450e6)
+			{
+				trx_data.rx_frequency = u32_val;
+				interface_resp_byte(cid, ERR_OK);
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_RANGE);
+			}
+		break;
+
+		case CMD_SET_TX_FREQ:
+			if (pld_len == sizeof(uint32_t))
+			{
+				memcpy((uint8_t*)&u32_val, pld, sizeof(uint32_t));
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_CMD_MALFORM);
+				break;
+			}
+
+			if(u32_val>=420e6 && u32_val<=450e6)
+			{
+				trx_data.tx_frequency = u32_val;
+				interface_resp_byte(cid, ERR_OK);
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_RANGE);
+			}
+		break;
+
+		case CMD_SET_TX_POWER:
+			if (pld_len == 1)
+			{
+				i8_val = *(int8_t*)pld;
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_CMD_MALFORM);
+				break;
+			}
+
+			f_val = i8_val*0.25f; //convert TX power to dBm
+			if(f_val>=-16.0f && f_val<=14.0) //-16 to 14 dBm (raw values of 0x03 to 0x3F)
+			{
+				trx_data.pwr = floorf((f_val+18.0f)*2.0f-1.0f);
+				//power setting is now stored in the struct
+				//the change will be applied at the next RX->TX switch
+				interface_resp_byte(cid, ERR_OK);
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_RANGE);
+			}
+		break;
+
+	  	case CMD_SET_FREQ_CORR:
+	  		if (pld_len == sizeof(int16_t))
+	  		{
+	  			memcpy((uint8_t*)&i16_val, pld, sizeof(int16_t));
+	  		}
+	  		else
+	  		{
+	  			interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			break;
+	  		}
+
+			if(i16_val>=-200 && i16_val<=200) //keep it within a sane range
+			{
+				trx_data.fcorr = i16_val;
+				interface_resp_byte(cid, ERR_OK);
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_RANGE);
+			}
+		break;
+
+	  	case CMD_SET_AFC:
+	  		if (pld_len == 1)
+	  		{
+	  			u8_val = *pld;
+	  		}
+	  		else
+	  		{
+	  			interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			break;
+	  		}
+
+	  		//the change will be applied at the next TX->RX switch
+			trx_data.afc = u8_val==0 ? 0 : 1;
+			interface_resp_byte(cid, ERR_OK);
+		break;
+
+	  	  case CMD_TX_START:
+	  		  if (pld_len == 1)
+	  		  {
+	  			  u8_val = *pld;
+	  		  }
+	  		  else
+	  		  {
+	  			  interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			  break;
+	  		  }
+
+	  		  if(u8_val) //start
+	  		  {
+				  if(trx_state==TRX_IDLE && dev_err==ERR_OK)
+				  {
+					  //reset the buffer and state machine
+					  memset(circ_bsb_tx_buff, 0, sizeof(circ_bsb_tx_buff));
+					  circ_bsb_buff_tail = 0;
+					  circ_bsb_buff_head = 0;
+
+					  //config CC1200
+					  trx_state = TRX_TX;
+					  trx_config(MODE_TX, trx_data);
+					  HAL_Delay(10);
+
+					  //switch CC1200 to TX
+					  trx_write_cmd(STR_STX);
+
+					  //initiate samples transfer (write)
+					  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
+					  trx_set_CS(0); //CS low
+					  HAL_SPI_Transmit(&hspi1, header, 2, 2); //send 2-byte header
+
+					  //signal TX state with LEDs
+					  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 1);
+					  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 0);
+
+					  //enable external baseband sample triggering
+					  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+					  //reply
+					  interface_resp_byte(cid, ERR_OK);
+				  }
+				  else
+				  {
+					  if (dev_err!=ERR_OK)
+	  					  interface_resp_byte(cid, ERR_OTHER);
+					  else
+						  interface_resp_byte(cid, ERR_BUSY);
+				  }
+	  		  }
+	  		  else //stop
+	  		  {
+	  			  if(trx_state==TRX_TX && dev_err==ERR_OK)
+	  			  {
+					  //disable external baseband sample triggering
+					  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+
+					  //finalize samples transfer
+					  trx_set_CS(1); //CS high
+
+					  //switch state
+					  trx_state = TRX_IDLE;
+
+					  //config CC1200
+					  trx_config(MODE_RX, trx_data);
+					  HAL_Delay(10);
+
+					  //switch CC1200 to RX state
+					  trx_write_cmd(STR_SRX);
+
+					  //turn off the TX LED
+					  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
+
+					  //reply
+					  interface_resp_byte(cid, ERR_OK);
+	  		  	  }
+	  			  else
+	  			  {
+	  				  if (dev_err!=ERR_OK)
+	  					  interface_resp_byte(cid, ERR_OTHER);
+	  				  else
+	  					  interface_resp_byte(cid, ERR_NOP);
+	  			  }
+	  		  }
+		  break;
+
+	  	  case CMD_RX_START:
+	  		  if (pld_len == 1)
+	  		  {
+	  			  u8_val = *pld;
+	  		  }
+	  		  else
+	  		  {
+	  			  interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			  break;
+	  		  }
+
+	  		  if(u8_val) //start
+	  		  {
+	  			  if(trx_state==TRX_IDLE && dev_err==ERR_OK)
+	  			  {
+	  				  //reset buffers
+	  				  memset(bsb_rx, 0, sizeof(bsb_rx));
+	  				  rx_pend = 0;
+	  				  rx_num_wr = 0;
+
+	  				  //config CC1200
+	  				  trx_config(MODE_RX, trx_data);
+	  				  HAL_Delay(10);
+
+	  				  //switch CC1200 to RX
+	  				  trx_write_cmd(STR_SRX);
+	  				  trx_state = TRX_RX;
+
+	  				  //initiate samples transfer (readout)
+	  				  uint8_t header[2] = {0x2F|0xC0, 0x7D};	//CFM_RX_DATA_OUT, burst access
+	  				  trx_set_CS(0);							//CS low
+	  				  HAL_SPI_Transmit(&hspi1, header, 2, 10);	//send 2-byte header
+
+	  				  //for some reason, the external signal runs at 75.7582kHz instead of expected 24kHz
+	  				  FIX_TIMER_TRIGGER(&htim11);
+	  				  TIM11->CNT = 0;
+	  				  HAL_TIM_Base_Start_IT(&htim11);
+
+	  				  //signal RX state with LEDs
+	  				  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 1);
+	  				  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
+
+	  				  //reply
+	  				  interface_resp_byte(cid, ERR_OK);
+	  			  }
+	  			  else
+	  			  {
+					  if (dev_err!=ERR_OK)
+	  					  interface_resp_byte(cid, ERR_OTHER);
+					  else
+						  interface_resp_byte(cid, ERR_BUSY);
+	  			  }
+	  		  }
+	  		  else //stop
+	  		  {
+	  			  if (trx_state==TRX_RX && dev_err==ERR_OK)
+				  {
+					  //disable read baseband trigger signal
+					  HAL_TIM_Base_Stop_IT(&htim11);
+
+					  //finalize SPI samples transfer
+					  trx_set_CS(1);
+
+					  //switch device state
+					  trx_state = TRX_IDLE;
+
+					  //turn off the RX LED
+					  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 0);
+
+					  //reply
+					  interface_resp_byte(cid, ERR_OK); //OK
+				  }
+	  			  else
+	  			  {
+	  				  if (dev_err!=ERR_OK)
+	  					  interface_resp_byte(cid, ERR_OTHER);
+	  				  else
+	  					  interface_resp_byte(cid, ERR_NOP);
+	  			  }
+	  		  }
+		  break;
+
+	  	  case CMD_TX_DATA:
+	  		  if (trx_state==TRX_TX && pld_len==960)
+	  		  {
+	  			  //enough space in the circular buffer?
+	  			  if ((circ_bsb_buff_tail - circ_bsb_buff_head - 1 + BSB_TX_BUFF_SIZE) % BSB_TX_BUFF_SIZE >= 960)
+	  			  {
+	  				  u32_val = BSB_TX_BUFF_SIZE - circ_bsb_buff_head;
+
+	  				  if (u32_val >= 960)
+	  				  {
+	  					  memcpy(&circ_bsb_tx_buff[circ_bsb_buff_head], pld, 960);
+	  				  }
+	  				  else
+	  				  {
+					      memcpy(&circ_bsb_tx_buff[circ_bsb_buff_head], pld, u32_val);
+						  memcpy(&circ_bsb_tx_buff[0], pld + u32_val, 960 - u32_val);
+	  				  }
+
+					  circ_bsb_buff_head = (circ_bsb_buff_head+960) % BSB_TX_BUFF_SIZE;
+					  interface_resp_byte(cid, ERR_OK);
+	  			  }
+	  			  else
+	  			  {
+	  				  interface_resp_byte(cid, ERR_BUFF_FULL);
+	  			  }
+	  		  }
+	  	  break;
+
+	  	  case CMD_GET_IDENT:
+			  //reply with the device's IDENT string
+			  interface_resp_short(cid, (uint8_t*)IDENT_STR, strlen(IDENT_STR));
+		  break;
+
+	  	  case CMD_GET_CAPS:
+			  //so far, the CC1200-HAT can do FM only, half-duplex
+			  interface_resp_byte(cid, 0x02);
+		  break;
+
+	  	  case CMD_GET_RX_FREQ:
+	  		  interface_resp_short(cid, (uint8_t*)&trx_data.rx_frequency, sizeof(uint32_t));
+		  break;
+
+	  	  case CMD_GET_TX_FREQ:
+	  		  interface_resp_short(cid, (uint8_t*)&trx_data.tx_frequency, sizeof(uint32_t));
+		  break;
+
+	  	  case CMD_GET_BSB_BUFF:
+	  		  //TODO: put some working code here
+	  		  interface_resp_byte(cid, 0);
+	  	  break;
+
+	  	  case CMD_GET_RSSI:
+	  		  u8_val = trx_read_reg(0x2F71); //RSSI
+	  		  interface_resp_byte(cid, u8_val);
+		  break;*/
 	}
 }
 
-uint8_t trx_readreg(enum trx_t trx, const uint16_t addr)
+void uart_ctrl_process(void)
 {
-	uint8_t txd[3]={addr>>8, addr&0xFF, 0};
-	uint8_t rxd[3]={0, 0, 0};
+    uint8_t b;
 
-	set_CS(trx, 0);
-	if(txd[0]==0)
-	{
-		txd[1]|=0x80;
-		HAL_SPI_TransmitReceive(&hspi1, &txd[1], rxd, 2, 10);
-		set_CS(trx, 1);
-		return rxd[1];
-	}
-	else
-	{
-		txd[0]|=0x80;
-		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 3, 10);
-		set_CS(trx, 1);
-		return rxd[2];
-	}
-}
+    while (uart_ctrl_get_byte(&b))
+    {
+        switch (uart_ctrl_state)
+        {
+			case WAIT_ID:
+				cmd_id = b;
+				uart_ctrl_state = WAIT_LEN1;
+			break;
 
-uint8_t trx_writereg(enum trx_t trx, const uint16_t addr, const uint8_t val)
-{
-	uint8_t txd[3]={addr>>8, addr&0xFF, val};
-	uint8_t rxd[3]={0, 0, 0};
+			case WAIT_LEN1:
+				cmd_len = b;
+				uart_ctrl_state = WAIT_LEN2;
+			break;
 
-	set_CS(trx, 0);
-	if(txd[0]==0)
-	{
-		HAL_SPI_TransmitReceive(&hspi1, &txd[1], rxd, 2, 10);
-	}
-	else
-	{
-		HAL_SPI_TransmitReceive(&hspi1, txd, rxd, 3, 10);
-	}
-	set_CS(trx, 1);
+			case WAIT_LEN2:
+				cmd_len |= ((uint16_t)b << 8);
+				payload_pos = 0;
 
-	return rxd[0]>>7; //bit 7 is the `CHIP_RDYn` and should be low for normal operation
-}
+				if (cmd_len == 3)
+				{
+					handle_command(cmd_id, NULL, 0);
+					uart_ctrl_state = WAIT_ID;
+				}
+				else
+					uart_ctrl_state = WAIT_PAYLOAD;
+			break;
 
-void trx_writecmd(enum trx_t trx, uint8_t addr)
-{
-	uint8_t txd=addr;
+			case WAIT_PAYLOAD:
+				payload[payload_pos++] = b;
 
-	set_CS(trx, 0);
-	HAL_SPI_Transmit(&hspi1, &txd, 1, 10);
-	set_CS(trx, 1);
-}
-
-uint8_t read_pn(enum trx_t trx)
-{
-	return trx_readreg(trx, 0x2F8F);
-}
-
-uint8_t read_status(enum trx_t trx)
-{
-	uint8_t txd=STR_SNOP; //no operation strobe
-	uint8_t rxd=0;
-
-	set_CS(trx, 0);
-	HAL_SPI_TransmitReceive(&hspi1, &txd, &rxd, 1, 10);
-	set_CS(trx, 1);
-
-	return rxd;
-}
-
-void detect_ic(uint8_t* rx, uint8_t* tx)
-{
-	uint8_t rxid=read_pn(CHIP_RX);
-	uint8_t txid=read_pn(CHIP_TX);
-
-	if(rxid==0x20)
-		sprintf((char*)rx, "CC1200");
-	else if(rxid==0x21)
-		sprintf((char*)rx, "CC1201");
-	else
-		sprintf((char*)rx, "unknown ID (0x%02X)", rxid);
-
-	if(txid==0x20)
-		sprintf((char*)tx, "CC1200");
-	else if(txid==0x21)
-		sprintf((char*)tx, "CC1201");
-	else
-		sprintf((char*)tx, "unknown ID (0x%02X)", txid);
-}
-
-void config_ic(enum trx_t trx, uint8_t* settings)
-{
-	for(uint8_t i=0; i<CC1200_REG_NUM; i++)
-	{
-		//dbg_print(TERM_YELLOW, "[%03d] 0x%02X 0x%02X 0x%02X\n",
-		//		i*3, settings[i*3], settings[i*3+1], settings[i*3+2]);
-		set_CS(trx, 0);
-		if(settings[i*3])
-			HAL_SPI_Transmit(&hspi1, &settings[i*3], 3, 10);
-		else
-			HAL_SPI_Transmit(&hspi1, &settings[i*3+1], 2, 10);
-		set_CS(trx, 1);
-		//HAL_Delay(10);
-	}
-}
-
-void config_rf(enum trx_t trx, struct trx_data_t trx_data)
-{
-	static uint8_t cc1200_rx_settings[CC1200_REG_NUM*3] =
-	{
-		0x00, 0x01, 0x08,
-		0x00, 0x03, 0x09,
-		0x00, 0x08, 0x1F,
-		0x00, 0x0A, 0xAD, //deviation - a little bit under 3.3kHz full scale
-		0x00, 0x0B, 0x00, //deviation
-		0x00, 0x0C, 0x5D,
-		0x00, 0x0D, 0x00,
-		0x00, 0x0E, 0x8A,
-		0x00, 0x0F, 0xCB,
-		0x00, 0x10, 0xAC, //RX filter BW - 9.5kHz
-		0x00, 0x11, 0x00,
-		0x00, 0x12, 0x45,
-		0x00, 0x13, 0x43, //symbol rate 2 - 1.5k sym/s
-		0x00, 0x14, 0xA9, //symbol rate 1
-		0x00, 0x15, 0x2A, //symbol rate 0
-		0x00, 0x16, 0x37, //AGC_REF - AGC Reference Level Configuration
-		0x00, 0x17, 0xEC,
-		0x00, 0x19, 0x11,
-		0x00, 0x1B, 0x51,
-		0x00, 0x1C, 0x87,
-		0x00, 0x1D, 0x00,
-		0x00, 0x20, 0x14,
-		0x00, 0x26, 0x03,
-		0x00, 0x27, 0x00,
-		0x00, 0x28, 0x20,
-		0x00, 0x2B, 0x03, //output power - 0x03..0x3F (doesn't matter for RX)
-		0x00, 0x2E, 0xFF,
-		0x2F, 0x00, 0x1C,
-		0x2F, 0x01, 0x02, //AFC, 0x22 - on, 0x02 - off
-		0x2F, 0x04, 0x00, //ECG_CFG - External Clock Frequency Configuration - irrelevant
-		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
-		0x2F, 0x0C, 0x57, //frequency - round((float)435000000/5000000*(1<<16))=0x570000
-		0x2F, 0x0D, 0x00, //frequency
-		0x2F, 0x0E, 0x00, //frequency
-		0x2F, 0x10, 0xEE,
-		0x2F, 0x11, 0x10,
-		0x2F, 0x12, 0x07,
-		0x2F, 0x13, 0xAF, //FS loop bandwidth - 500kHz RX/TX
-		0x2F, 0x16, 0x40,
-		0x2F, 0x17, 0x0E,
-		0x2F, 0x19, 0x03,
-		0x2F, 0x1B, 0x33,
-		0x2F, 0x1D, 0x17,
-		0x2F, 0x1F, 0x00,
-		0x2F, 0x20, 0x6E,
-		0x2F, 0x21, 0x1C,
-		0x2F, 0x22, 0xAC,
-		0x2F, 0x27, 0xB5,
-		0x2F, 0x32, 0x0E,
-		0x2F, 0x36, 0x03,
-		0x2F, 0x91, 0x08
-	};
-
-	static uint8_t cc1200_tx_settings[CC1200_REG_NUM*3] =
-	{
-		0x00, 0x01, 0x08,
-		0x00, 0x03, 0x09,
-		0x00, 0x08, 0x1F,
-		0x00, 0x0A, 0xAD, //deviation - a little bit under 3.3kHz full scale
-		0x00, 0x0B, 0x00, //deviation
-		0x00, 0x0C, 0x5D,
-		0x00, 0x0D, 0x00,
-		0x00, 0x0E, 0x8A,
-		0x00, 0x0F, 0xCB,
-		0x00, 0x10, 0xAC, //RX filter BW - 9.5kHz (doesn't matter for TX)
-		0x00, 0x11, 0x00,
-		0x00, 0x12, 0x45,
-		0x00, 0x13, 0x43, //symbol rate 2 - 1.5k symb/s
-		0x00, 0x14, 0xA9, //symbol rate 1
-		0x00, 0x15, 0x2A, //symbol rate 0
-		0x00, 0x16, 0x37,
-		0x00, 0x17, 0xEC,
-		0x00, 0x19, 0x11,
-		0x00, 0x1B, 0x51,
-		0x00, 0x1C, 0x87,
-		0x00, 0x1D, 0x00,
-		0x00, 0x20, 0x14,
-		0x00, 0x26, 0x03,
-		0x00, 0x27, 0x00,
-		0x00, 0x28, 0x20,
-		0x00, 0x2B, 0x03, //output power - 0x03..0x3F
-		0x00, 0x2E, 0xFF,
-		0x2F, 0x00, 0x1C,
-		0x2F, 0x01, 0x22,
-		0x2F, 0x04, 0x00, //ECG_CFG - External Clock Frequency Configuration - irrelevant
-		0x2F, 0x05, 0x09, //16x upsampler, CFM enable
-		0x2F, 0x0C, 0x57, //frequency - round((float)435000000/5000000*(1<<16))=0x570000
-		0x2F, 0x0D, 0x00, //frequency
-		0x2F, 0x0E, 0x00, //frequency
-		0x2F, 0x10, 0xEE,
-		0x2F, 0x11, 0x10,
-		0x2F, 0x12, 0x07,
-		0x2F, 0x13, 0xAF, //FS loop bandwidth - 500kHz RX/TX
-		0x2F, 0x16, 0x40,
-		0x2F, 0x17, 0x0E,
-		0x2F, 0x19, 0x03,
-		0x2F, 0x1B, 0x33,
-		0x2F, 0x1D, 0x17,
-		0x2F, 0x1F, 0x00,
-		0x2F, 0x20, 0x6E,
-		0x2F, 0x21, 0x1C,
-		0x2F, 0x22, 0xAC,
-		0x2F, 0x27, 0xB5,
-		0x2F, 0x32, 0x0E,
-		0x2F, 0x36, 0x03,
-		0x2F, 0x91, 0x08
-	};
-
-	uint32_t freq_word=roundf((float)trx_data.frequency/5000000.0*((uint32_t)1<<16));
-	//dbg_print(0, "freq_word=%04lX\n", freq_word);
-
-	if(trx==CHIP_RX)
-	{
-		cc1200_rx_settings[32*3-1]=(freq_word>>16)&0xFF;
-		cc1200_rx_settings[33*3-1]=(freq_word>>8)&0xFF;
-		cc1200_rx_settings[34*3-1]=freq_word&0xFF;
-		config_ic(trx, cc1200_rx_settings);
-		//trx_writereg(trx, 0x0001, 29);		//IOCFG2, GPIO2 - CLKEN_CFM
-	}
-	else if(trx==CHIP_TX)
-	{
-		uint8_t tx_pwr=trx_data.pwr;
-		if(tx_pwr>0x3F) tx_pwr=0x3F;
-		if(tx_pwr<0x03) tx_pwr=0x03;
-		cc1200_tx_settings[26*3-1]=tx_pwr;
-		cc1200_tx_settings[32*3-1]=(freq_word>>16)&0xFF;
-		cc1200_tx_settings[33*3-1]=(freq_word>>8)&0xFF;
-		cc1200_tx_settings[34*3-1]=freq_word&0xFF;
-		config_ic(trx, cc1200_tx_settings);
-		trx_writereg(trx, 0x0001, 30);		//IOCFG2, GPIO2 - CFM_TX_DATA_CLK
-	}
-
-	//frequency correction
-	trx_writereg(trx, 0x2F0A, (uint16_t)trx_data.fcorr>>8);
-	trx_writereg(trx, 0x2F0B, (uint16_t)trx_data.fcorr&0xFF);
-	//disable address autoincrement in burst mode (default - enabled)
-	//trx_writereg(trx, 0x2F06, 0);
-	//KVCO high resolution enable
-	trx_writereg(trx, 0x2F14, 1<<6);
-}
-
-void interface_resp(enum cari_cmd_t cmd, const uint8_t resp)
-{
-	static uint8_t tmp[4]={0,0,0,0};
-	tmp[0]=cmd;
-	tmp[1]=4;
-	tmp[2]=0;
-	tmp[3]=resp;
-	HAL_UART_Transmit_DMA(&huart1, tmp, 4);
+				if (payload_pos >= cmd_len - 3)
+				{
+					handle_command(cmd_id, payload, payload_pos);
+					uart_ctrl_state = WAIT_ID;
+				}
+			break;
+        }
+    }
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -523,106 +853,36 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	TIM_TypeDef* tim = htim->Instance;
 
 	//USART1 timeout timer
-	if(tim==TIM6)
+	if(tim == TIM6)
 	{
-		HAL_TIM_Base_Stop_IT(&htim6);
-
-		if(interface_comm==COMM_IDLE)
-		{
-			interface_comm=COMM_TOT; //set the TOT flag
-		}
+		HAL_TIM_Base_Stop_IT(ctrl_uart_tot);
+		uart_ctrl_state = WAIT_ID;
 	}
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-	if(GPIO_Pin==TX_TRIG_Pin)
+	//24kHz trigger signal from the RX CC1200
+	if(GPIO_Pin == TX_TRIG_Pin)
 	{
 		set_TP(TP1, 1);
-		if(rx_state==RX_ACTIVE)
-		{
-			//set_TP(TP1, 1);
-			rx_bsb_buff[rx_bsb_cnt]=trx_readreg(CHIP_RX, 0x2F7D);
-			rx_bsb_cnt++;
 
-			if(rx_bsb_cnt>=BSB_RX_BUFLEN)
-			{
-				rx_bsb_cnt=0;
-				rx_bsb_buff_rdy=2;
-			}
-			else if(rx_bsb_cnt==BSB_RX_BUFLEN/2)
-			{
-				rx_bsb_buff_rdy=1;
-			}
-			//set_TP(TP1, 0);
-		}
+		;
 
-		if(tx_state==TX_ACTIVE)
-		{
-			//set_TP(TP2, 1);
-			if(bsb_tx_cplt==0)
-			{
-				trx_writereg(CHIP_TX, 0x2F7E, tx_bsb_buff[tx_bsb_cnt%BSB_TX_BUFLEN]);
-				tx_bsb_cnt++;
-
-				if(tx_bsb_cnt>=tx_bsb_total_cnt)
-					bsb_tx_cplt=1;
-			}
-			//set_TP(TP2, 0);
-		}
 		set_TP(TP1, 0);
 	}
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+/*void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	USART_TypeDef* iface = huart->Instance;
 
+	//UART for control
 	if(iface==USART1)
 	{
-		/*rx_bc++;
-		//check frame's validity
-		if(rx_bc>=3 && rx_bc==*((uint16_t*)&rxb[1]))
-		{
-			HAL_TIM_Base_Stop_IT(&htim6);
-			rx_bc=0;
-			interface_comm=COMM_RDY;
-			return;
-		}
-
-		//handle normal comm conditions and overflow
-		if(rx_bc<sizeof(rxb)) //all normal - proceed
-		{
-			HAL_UART_Receive_IT(&huart1, (uint8_t*)&rxb[rx_bc], 1);
-			//reset timeout timer
-			TIM6->CNT=0;
-			FIX_TIMER_TRIGGER(&htim6);
-			HAL_TIM_Base_Start_IT(&htim6);
-		}
-		else //overflow
-		{
-			interface_comm=COMM_OVF; //set overflow flag, shouldn't normally happen
-		}*/
-		if(interface_comm==COMM_NEXT)
-		{
-			HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
-			interface_comm=COMM_RDY;
-		}
-		else if(interface_comm==COMM_IDLE)
-		{
-			if((rxb[0]==CMD_PING || rxb[0]>=CMD_GET_IDENT) && rxb[1]==3)
-			{
-				HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
-				interface_comm=COMM_RDY;
-			}
-			else
-			{
-				HAL_UART_Receive_DMA(&huart1, (uint8_t*)&rxb[3], *((uint16_t*)&rxb[1])-3);
-				interface_comm=COMM_NEXT;
-			}
-		}
+		;
 	}
-}
+}*/
 /* USER CODE END 0 */
 
 /**
@@ -661,87 +921,9 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_TIM6_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
-  //enable FPU
-  #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
-	SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));  /* set CP10 and CP11 Full Access */
-  #endif
-
-  //default settings
-  set_rf_pwr_setpoint(0);
-  set_dac_ch2(0); //can be used for debugging
-  rf_pa_en(0);
-  set_CS(CHIP_RX, 1);
-  set_CS(CHIP_TX, 1);
-  set_TP(TP1, 0);
-  set_TP(TP2, 0);
-
-  HAL_Delay(100);
-  trx_writecmd(CHIP_RX, STR_SRES);
-  trx_writecmd(CHIP_TX, STR_IDLE);
-  dbg_print(0, TERM_CLR); //clear console and print out ident string
-  dbg_print(TERM_GREEN, IDENT_STR); dbg_print(0,  "\n");
-
-  HAL_Delay(10);
-  detect_ic(trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
-  dbg_print(0, "RX IC: %s\nTX IC: %s\n", trx_data[CHIP_RX].name, trx_data[CHIP_TX].name);
-
-  trx_data[CHIP_RX].frequency=433475000;				//default
-  trx_data[CHIP_TX].frequency=435000000;
-  trx_data[CHIP_RX].fcorr=0;
-  trx_data[CHIP_TX].fcorr=0;
-  trx_data[CHIP_TX].pwr=63;								//3 to 63
-  tx_dbm=30.00f;										//30dBm (1W) default
-  alc_set=dbm_to_alc(tx_dbm);							//convert to DAC value
-
-  dbg_print(0, "Starting TRX config...");
-  config_rf(CHIP_RX, trx_data[CHIP_RX]);
-  config_rf(CHIP_TX, trx_data[CHIP_TX]);
-  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency deviation at TX idle
-  dbg_print(TERM_GREEN, " done\n");
-
-  HAL_Delay(50);
-  trx_writecmd(CHIP_RX, STR_SCAL);
-  trx_writecmd(CHIP_TX, STR_SCAL);
-
-  HAL_Delay(50);
-  trx_data[CHIP_RX].pll_locked = ((trx_readreg(CHIP_RX, 0x2F8D)^0x80)&0x81)==0x81; //FSCAL_CTRL=1 and FSCAL_CTRL_NOT_USED=0
-  trx_data[CHIP_TX].pll_locked = ((trx_readreg(CHIP_TX, 0x2F8D)^0x80)&0x81)==0x81;
-  dbg_print(0, "RX PLL");
-  trx_data[CHIP_RX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
-  dbg_print(0, "TX PLL");
-  trx_data[CHIP_TX].pll_locked ? dbg_print(TERM_GREEN, " locked\n") : dbg_print(TERM_RED, " unlocked\n");
-
-  if(!trx_data[CHIP_RX].pll_locked)
-  {
-	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_RX_PLL, errstrings[ERR_RX_PLL]);
-	  dev_err|=(1UL<<ERR_RX_PLL);
-  }
-  if(!trx_data[CHIP_TX].pll_locked)
-  {
-	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_PLL, errstrings[ERR_TX_PLL]);
-	  dev_err|=(1UL<<ERR_TX_PLL);
-  }
-  if(strstr((char*)trx_data[CHIP_RX].name, "unknown")!=NULL)
-  {
-  	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_RX_SPI, errstrings[ERR_RX_SPI]);
-  	  dev_err|=(1UL<<ERR_RX_SPI);
-  }
-  if(strstr((char*)trx_data[CHIP_TX].name, "unknown")!=NULL)
-  {
-  	  dbg_print(TERM_RED, "ERROR %d: %s\n", ERR_TX_SPI, errstrings[ERR_TX_SPI]);
-  	  dev_err|=(1UL<<ERR_TX_SPI);
-  }
-
-  trx_writecmd(CHIP_RX, STR_SRX);
-  trx_writecmd(CHIP_TX, STR_STX);
-
-  //dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_readreg(CHIP_TX, STR_SNOP)>>4);
-  //dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
-
-  //enable interface comms over UART1
-  //memset((uint8_t*)rxb, 0, sizeof(rxb));
-  HAL_UART_Receive_DMA(&huart1, (uint8_t*)rxb, 3);
+  platform_init();
 
   /* USER CODE END 2 */
 
@@ -871,308 +1053,7 @@ int main(void)
 
   while(1)
   {
-	  if(interface_comm==COMM_RDY) //if a valid interface frame is detected
-	  {
-		  //dbg_print(0, "type 0x%02X\tlen %02d\n", rxb[0], rxb[1]);
-
-		  uint32_t freq;
-		  static uint8_t ident[128];
-		  static uint8_t resp[15]; //response buffer
-
-		  switch(rxb[0])
-		  {
-		  	  //PING
-		  	  case CMD_PING:
-		  		  dbg_print(0, "[INTRFC_CMD] PING\n");
-		  		  resp[0]=CMD_PING;
-		  		  *((uint16_t*)&resp[1])=7;
-		  		  memcpy(&resp[3], (uint8_t*)&dev_err, sizeof(uint32_t));
-		  		  HAL_UART_Transmit_DMA(&huart1, resp, 7); //error code, 0 for OK
-		  	  break;
-
-		  	  //SET commands
-		  	  case CMD_SET_RX_FREQ:
-		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //we take 4 least significant bytes
-		  		  if(freq>=420e6 && freq<=450e6)
-		  		  {
-		  			  dbg_print(0, "[INTRFC_CMD] RX %ld Hz\n", freq);
-		  			  trx_writecmd(CHIP_RX, STR_IDLE);
-		  			  HAL_Delay(10);
-		  			  //reconfig RX
-		  			  trx_data[CHIP_RX].frequency=freq;
-		  			  uint32_t freq_word=roundf((float)freq/5000000.0*((uint32_t)1<<16));
-		  			  trx_writereg(CHIP_RX, 0x2F0C, (freq_word>>16)&0xFF);
-		  			  trx_writereg(CHIP_RX, 0x2F0D, (freq_word>>8)&0xFF);
-		  			  trx_writereg(CHIP_RX, 0x2F0E, freq_word&0xFF);
-		  			  trx_writecmd(CHIP_RX, STR_SRX);
-		  			  HAL_Delay(20);
-		  			  if(trx_readreg(CHIP_RX, STR_SNOP)>>4==STATE_RX) //PLL locked and state=RX?
-		  				  interface_resp(CMD_SET_RX_FREQ, ERR_OK); //OK
-		  			  else
-		  				interface_resp(CMD_SET_RX_FREQ, ERR_RX_PLL); //PLL lock error
-		  		  }
-		  		  else
-		  		  {
-		  			  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested RX frequency of %ld Hz is out of range\n", freq);
-		  			  interface_resp(CMD_SET_RX_FREQ, ERR_RANGE); //ERR
-		  		  }
-		  	  break;
-
-		  	  case CMD_SET_TX_FREQ:
-		  		  memcpy((uint8_t*)&freq, (uint8_t*)&rxb[3], sizeof(uint32_t)); //we take 4 least significant bytes
-		  		  if(freq>=420e6 && freq<=450e6)
-		  		  {
-		  			  dbg_print(0, "[INTRFC_CMD] TX %ld Hz\n", freq);
-		  			  trx_writecmd(CHIP_TX, STR_IDLE);
-		  			  HAL_Delay(10);
-		  			  //reconfig TX
-		  			  trx_data[CHIP_TX].frequency=freq;
-		  			  uint32_t freq_word=roundf((float)freq/5000000.0*((uint32_t)1<<16));
-		  			  trx_writereg(CHIP_TX, 0x2F0C, (freq_word>>16)&0xFF);
-		  			  trx_writereg(CHIP_TX, 0x2F0D, (freq_word>>8)&0xFF);
-		  			  trx_writereg(CHIP_TX, 0x2F0E, freq_word&0xFF);
-		  			  trx_writecmd(CHIP_TX, STR_STX);
-		  			  HAL_Delay(20);
-		  			  if(trx_readreg(CHIP_TX, STR_SNOP)>>4==STATE_TX) //PLL locked and state=TX?
-		  				  interface_resp(CMD_SET_TX_FREQ, ERR_OK); //OK
-		  			  else
-		  				  interface_resp(CMD_SET_TX_FREQ, ERR_TX_PLL); //PLL lock error
-		  		  }
-		  		  else
-		  		  {
-		  			  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested TX frequency of %ld Hz is out of range\n", freq);
-		  			  interface_resp(CMD_SET_TX_FREQ, ERR_RANGE); //ERR
-		  		  }
-			  break;
-
-		  	  case CMD_SET_TX_POWER:
-				  if(rxb[3]*0.25f>=30.0f && rxb[3]*0.25f<=47.75) //about 1 to 60W out
-				  {
-					  tx_dbm=rxb[3]*0.25f;
-					  dbg_print(0, "[INTRFC_CMD] TX PWR %2.2f dBm\n", tx_dbm);
-					  alc_set=dbm_to_alc(tx_dbm);
-					  interface_resp(CMD_SET_TX_POWER, ERR_OK); //OK
-				  }
-				  else
-				  {
-					  //no change, return error code
-					  dbg_print(TERM_YELLOW, "[INTRFC_CMD] requested output power is out of range\n");
-					  interface_resp(CMD_SET_TX_POWER, ERR_RANGE); //ERR
-				  }
-			  break;
-
-		  	  case CMD_SET_RX_FREQ_CORR:
-		  		  trx_data[CHIP_RX].fcorr=roundf((trx_data[CHIP_RX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
-		  		  trx_writereg(CHIP_RX, 0x2F0A, (uint16_t)trx_data[CHIP_RX].fcorr>>8);
-		  		  trx_writereg(CHIP_RX, 0x2F0B, (uint16_t)trx_data[CHIP_RX].fcorr&0xFF);
-		  		  dbg_print(0, "[INTRFC_CMD] RX frequency correction: %3.1f ppm (%d)\n", *((float*)&rxb[3]), trx_data[CHIP_RX].fcorr);
-		  		  interface_resp(CMD_SET_RX_FREQ_CORR, ERR_OK); //OK
-			  break;
-
-		  	  case CMD_SET_TX_FREQ_CORR:
-		  		  trx_data[CHIP_TX].fcorr=roundf((trx_data[CHIP_TX].frequency/1.0e6f)*(*((float*)&rxb[3]))/FCORR_STEP);
-		  		  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
-		  		  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
-		  		  dbg_print(0, "[INTRFC_CMD] TX frequency correction: %3.1f ppm (%d)\n", *((float*)&rxb[3]), trx_data[CHIP_TX].fcorr);
-		  		  interface_resp(CMD_SET_TX_FREQ_CORR, ERR_OK); //OK
-			  break;
-
-		  	  case CMD_SET_AFC:
-		  		  dbg_print(0, "[INTRFC_CMD] RX AFC");
-		  		  if(rxb[3])
-		  		  {
-		  			  trx_writereg(CHIP_RX, 0x2F01, 0x22);
-		  			  dbg_print(TERM_GREEN, " enabled\n");
-		  		  }
-		  		  else
-		  		  {
-		  			  trx_writereg(CHIP_RX, 0x2F01, 0x02);
-		  			  dbg_print(TERM_GREEN, " disabled\n");
-		  		  }
-		  		  interface_resp(CMD_SET_AFC, ERR_OK); //OK
-			  break;
-
-		  	  case CMD_SET_RX:
-		  		  if(rxb[3]) //start
-		  		  {
-		  			  if(rx_state==RX_IDLE && dev_err==ERR_OK)
-		  			  {
-		  				  rx_bsb_cnt=0;
-		  				  memset((uint8_t*)rx_bsb_buff, 0, BSB_RX_BUFLEN);
-		  				  dbg_print(0, "[INTRFC_CMD] RX start\n");
-		  				  rx_state=RX_ACTIVE;
-		  			  }
-		  			  else
-		  			  {
-		  				  interface_resp(CMD_SET_RX, dev_err);
-		  			  }
-		  		  }
-		  		  else //stop
-		  		  {
-		  			  rx_state=RX_IDLE;
-		  			  rx_bsb_buff_rdy=0;
-		  			  //give it some time to finish pending transfers
-		  			  HAL_Delay(40);
-		  			  interface_resp(CMD_SET_RX, 0); //OK
-		  			  dbg_print(0, "[INTRFC_CMD] RX stop\n");
-		  		  }
-			  break;
-
-		  	  case CMD_STREAM_DATA:
-		  		  //dbg_print(0, "[INTRFC_CMD] Stream data received (%d bytes)\n", *((uint16_t*)&rxb[1]));
-		  		  uint32_t len=*((uint16_t*)&rxb[1])-3;
-		  		  //if((tx_bsb_total_cnt%BSB_TX_BUFLEN)+len<=BSB_TX_BUFLEN)
-		  			  memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_TX_BUFLEN], (uint8_t*)&rxb[3], len);
-		  		  //else
-		  		  //{
-		  			  //uint32_t left=(tx_bsb_total_cnt%BSB_TX_BUFLEN)+len-BSB_TX_BUFLEN;
-		  			  //memcpy((uint8_t*)&tx_bsb_buff[tx_bsb_total_cnt%BSB_TX_BUFLEN], (uint8_t*)&rxb[3], len-left);
-		  			  //memcpy((uint8_t*)tx_bsb_buff, (uint8_t*)&rxb[3+len-left], left);
-		  		  //}
-		  		  tx_bsb_total_cnt+=len;
-		  		  if(tx_bsb_total_cnt>=BSB_TX_THRESH && tx_state==TX_IDLE)
-		  		  {
-		  			  //set tx CC1200 power to max and frequency deviation to zero
-		  			  //trx_data[CHIP_TX].pwr=63;
-		  			  //trx_writereg(CHIP_TX, 0x002B, 63);
-		  			  //trx_writereg(CHIP_TX, 0x2F7E, 0);
-		  			  set_rf_pwr_setpoint(alc_set);
-		  			  rf_pa_en(1);
-		  			  tx_state=TX_ACTIVE;
-		  		  }
-		  	  break;
-
-		  	  //GET commands
-		  	  case CMD_GET_IDENT:
-		  		  dbg_print(0, "[INTRFC_CMD] GET_IDENT\n");
-				  //reply with RRU's IDENT string
-				  sprintf((char*)&ident[3], IDENT_STR);
-				  ident[0]=CMD_GET_IDENT;
-				  *((uint16_t*)&ident[1])=strlen((char*)IDENT_STR)+3; //total length
-				  HAL_UART_Transmit_DMA(&huart1, ident, *((uint16_t*)&ident[1]));
-			  break;
-
-		  	  case CMD_GET_CAPS:
-		  		  dbg_print(0, "[INTRFC_CMD] GET_CAPS\n");
-				  //so far the RRU can do FM only, duplex
-				  interface_resp(CMD_GET_CAPS, (1<<CAP_FM)|(1<<CAP_DUPLEX));
-			  break;
-
-		  	  case CMD_GET_RX_FREQ:
-		  		  dbg_print(0, "[INTRFC_CMD] GET_RX_FREQ\n");
-		  		  resp[0]=CMD_GET_RX_FREQ;
-		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
-		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_RX].frequency, sizeof(uint32_t));
-		  		  memset(&resp[7], 0, 4); //MSB to 0
-		  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
-			  break;
-
-		  	  case CMD_GET_TX_FREQ:
-		  		  dbg_print(0, "[INTRFC_CMD] GET_TX_FREQ\n");
-		  		  resp[0]=CMD_GET_TX_FREQ;
-		  		  *((uint16_t*)&resp[1])=sizeof(uint64_t)+3;
-		  		  memcpy(&resp[3], (uint8_t*)&trx_data[CHIP_TX].frequency, sizeof(uint32_t));
-		  		  memset(&resp[7], 0, 4); //MSB to 0
-		  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
-			  break;
-
-		  	  case CMD_GET_MEAS:
-		  		  //dbg_print(0, "[INTRFC_CMD] GET_TX_FREQ\n");
-		  		  meas_req=1; //set request flag, process when ready (UART not busy)
-			  break;
-
-		  	  case 0x20:
-		  		  ;//set_rf_pwr_setpoint(0);
-			  break;
-
-		  	  default:
-		  		  ;
-		  	  break;
-		  }
-
-		  interface_comm=COMM_IDLE;
-	  }
-	  /*else if(interface_comm==COMM_TOT || interface_comm==COMM_OVF)
-	  {
-		  HAL_TIM_Base_Stop_IT(&htim6);
-		  HAL_UART_AbortReceive_IT(&huart1);
-		  rx_bc=0;
-		  HAL_UART_Receive_IT(&huart1, (uint8_t*)rxb, 1);
-		  interface_comm=COMM_IDLE;
-	  }*/
-
-	  //baseband transmission complete
-	  if(bsb_tx_cplt)
-	  {
-		  //debug
-		  //set_TP(TP2, 1);
-
-		  //interface_resp(CMD_SET_TX_START, 0); //OK - end of transmission
-
-		  trx_writereg(CHIP_TX, 0x2F7E, 0); //zero frequency deviation at TX idle
-		  set_rf_pwr_setpoint(0);
-		  //HAL_Delay(50);
-		  rf_pa_en(0);
-		  //trx_data[CHIP_TX].pwr=3; //set tx cc2100 power to the minimum at TX idle
-		  //trx_writereg(CHIP_TX, 0x002B, 3);
-
-		  tx_state=TX_IDLE;
-		  tx_bsb_cnt=0;
-		  tx_bsb_total_cnt=0;
-		  bsb_tx_cplt=0;
-
-		  //dbg_print(0, "[SELF] TX -> end\n"); //takes time!
-
-		  //debug
-		  //set_TP(TP2, 0);
-	  }
-
-	  //rx baseband buffer ready to be sent over UART
-	  if(rx_bsb_buff_rdy)
-	  {
-		  //make global?
-		  volatile static uint8_t h_buff[3+BSB_RX_BUFLEN/2]={CMD_STREAM_DATA, (BSB_RX_BUFLEN/2+3)&0xFF, (BSB_RX_BUFLEN/2+3)>>8};
-
-		  while(huart1.gState==HAL_UART_STATE_BUSY_TX); //wait while busy
-
-		  if(rx_bsb_buff_rdy==1)
-		  {
-			  //debug
-			  //set_TP(TP1, 1);
-
-			  memcpy((uint8_t*)&h_buff[3], (uint8_t*)&rx_bsb_buff[0], BSB_RX_BUFLEN/2);
-			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, 3+BSB_RX_BUFLEN/2);
-
-			  //debug
-			  //set_TP(TP1, 0);
-		  }
-		  else //implicit rx_bsb_buff_rdy==2
-		  {
-			  //debug
-			  //set_TP(TP2, 1);
-
-			  memcpy((uint8_t*)&h_buff[3], (uint8_t*)&rx_bsb_buff[BSB_RX_BUFLEN/2], BSB_RX_BUFLEN/2);
-			  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)h_buff, 3+BSB_RX_BUFLEN/2);
-
-			  //debug
-			  //set_TP(TP2, 0);
-		  }
-
-		  rx_bsb_buff_rdy=0;
-	  }
-
-	  if(meas_req==1 && huart1.gState!=HAL_UART_STATE_BUSY_TX)
-	  {
-		  //process pending stuff
-		  static uint8_t resp[6];
-  		  resp[0]=CMD_GET_MEAS;
-  		  *((uint16_t*)&resp[1])=3+3;
-  		  resp[3]=0x01;
-  		  resp[4]=0x02;
-  		  resp[5]=0x03;
-  		  HAL_UART_Transmit_DMA(&huart1, resp, *((uint16_t*)&resp[1]));
-		  meas_req=0;
-	  }
+	uart_ctrl_process();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -1251,11 +1132,11 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T8_TRGO;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 3;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
@@ -1398,9 +1279,9 @@ static void MX_TIM6_Init(void)
 
   /* USER CODE END TIM6_Init 1 */
   htim6.Instance = TIM6;
-  htim6.Init.Prescaler = 10-1;
+  htim6.Init.Prescaler = 8400-1;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 4200-1;
+  htim6.Init.Period = 10-1;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
@@ -1415,6 +1296,52 @@ static void MX_TIM6_Init(void)
   /* USER CODE BEGIN TIM6_Init 2 */
 
   /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 8400-1;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 1000-1;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim8, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
 
 }
 
@@ -1494,6 +1421,7 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* Configure DMA request hdma_memtomem_dma2_stream1 on DMA2_Stream1 */
   hdma_memtomem_dma2_stream1.Instance = DMA2_Stream1;
@@ -1515,6 +1443,9 @@ static void MX_DMA_Init(void)
   }
 
   /* DMA interrupt init */
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
