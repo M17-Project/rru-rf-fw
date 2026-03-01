@@ -38,7 +38,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define IDENT_STR			"Remote Radio Unit (RRU) 420-450 MHz\nFW v2.0.0 by Wojciech SP5WWP"
+#define IDENT_STR				"Remote Radio Unit (RRU) 420-450 MHz\nFW v2.0.0 by Wojciech SP5WWP"
 
 #define DBG_MSGS											//enable debug messages over DBG_UART
 #define VDDA					3.24f						//measured VDDA voltage
@@ -121,9 +121,9 @@ const float cal_offs	=  62.5f;				//dB
 const float cal_corr	=  -3.6f;				//dB
 
 //UART control and baseband transfer
-volatile uint8_t uart_ctrl_rx_buf[UART_LONG_BUF_SIZE];	//DMA UART RX buffer
-volatile uint16_t uart_ctrl_rx_buf_tail;
-enum uart_ctrl_state_t uart_ctrl_state = WAIT_ID;		//idle state
+volatile uint8_t uart_rx[UART_LONG_BUF_SIZE];	//DMA UART RX buffer
+volatile uint16_t uart_rx_tail;
+enum uart_state_t uart_state = WAIT_ID;		//idle state
 
 uint8_t cmd_id;
 uint16_t cmd_len;
@@ -135,7 +135,6 @@ typedef struct											//TX queue - short packets
 	uint8_t  data[UART_SHORT_BUF_SIZE];
 	uint16_t len;
 } txq_queue_t;
-
 txq_queue_t txq[SHORT_TXQ_SIZE];						//TX queue - short packets
 
 volatile uint8_t txq_head;
@@ -147,16 +146,15 @@ typedef struct											//TX queue - long packets
     uint8_t data[UART_LONG_BUF_SIZE];
     uint16_t len;
 } bsbq_queue_t;
-
 bsbq_queue_t bsbq[LONG_TXQ_SIZE];						//TX queue - long packets
 
 volatile uint8_t bsbq_head;
 volatile uint8_t bsbq_tail;
 volatile uint8_t bsbq_busy;
 
-uint8_t bsb_rx[2*BSB_SIZE];								//rx samples
+/*uint8_t bsb_rx[2*BSB_SIZE];								//rx samples
 volatile uint8_t rx_pend;								//pending rx sample read?
-uint16_t rx_num_wr;
+uint16_t rx_num_wr;*/
 
 uint8_t circ_bsb_tx_buff[BSB_TX_BUFF_SIZE];
 volatile uint16_t circ_bsb_buff_tail;
@@ -221,7 +219,7 @@ void get_meas_vals(float* pwr_fwd, float* pwr_ref, float* temp)
 
 //set rf power output setpoint
 //0 - lowest power, 0xFFF - max power
-void set_rf_pwr_setpoint(const uint16_t pwr)
+void set_rf_pwr_setpoint(uint16_t pwr)
 {
 	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, pwr>0xFFF?0xFFF:pwr);
 	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
@@ -299,9 +297,14 @@ void platform_init(void)
 	set_TP(TP1, 0);
 	set_TP(TP2, 0);
 
+	HAL_Delay(500);
+	trx_reset(CHIP_RX);
+	trx_reset(CHIP_TX);
+
 	HAL_Delay(100);
-	trx_write_cmd(CHIP_RX, STR_SRES);
+	trx_write_cmd(CHIP_RX, STR_IDLE);
 	trx_write_cmd(CHIP_TX, STR_IDLE);
+
 	dbg_print(0, TERM_CLR); //clear console and print out ident string
 	dbg_print(TERM_GREEN, IDENT_STR); dbg_print(0,  "\n");
 
@@ -314,7 +317,7 @@ void platform_init(void)
 	trx_data[CHIP_TX].freq = 435000000;
 	trx_data[CHIP_RX].fcorr = 0;
 	trx_data[CHIP_TX].fcorr = 0;
-	trx_data[CHIP_TX].pwr = 63;									//3 to 63
+	trx_data[CHIP_TX].pwr = 27;									//3 to 63
 	rru_settings.tx_pwr_dbm = 30.00f;							//30dBm (1W) default
 	set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));	//set the DAC for RF power setpoint
 
@@ -369,17 +372,17 @@ void platform_init(void)
 
 	//enable interface comms over UART1
 	set_uart_ctrl_timeout(10); //10ms timeout
-	HAL_UART_Receive_DMA(ctrl_uart, (uint8_t*)uart_ctrl_rx_buf, sizeof(uart_ctrl_rx_buf));
+	HAL_UART_Receive_DMA(ctrl_uart, (uint8_t*)uart_rx, sizeof(uart_rx));
 }
 
 uint16_t uart_ctrl_data_avbl(void)
 {
     uint16_t head = UART_LONG_BUF_SIZE - __HAL_DMA_GET_COUNTER(ctrl_uart->hdmarx);
 
-    if (head >= uart_ctrl_rx_buf_tail)
-        return head - uart_ctrl_rx_buf_tail;
+    if (head >= uart_rx_tail)
+        return head - uart_rx_tail;
     else
-        return UART_LONG_BUF_SIZE - uart_ctrl_rx_buf_tail + head;
+        return UART_LONG_BUF_SIZE - uart_rx_tail + head;
 }
 
 int uart_ctrl_get_byte(uint8_t *b)
@@ -387,8 +390,8 @@ int uart_ctrl_get_byte(uint8_t *b)
     if (uart_ctrl_data_avbl() == 0)
         return 0;
 
-    *b = uart_ctrl_rx_buf[uart_ctrl_rx_buf_tail];
-    uart_ctrl_rx_buf_tail = (uart_ctrl_rx_buf_tail + 1) % UART_LONG_BUF_SIZE;
+    *b = uart_rx[uart_rx_tail];
+    uart_rx_tail = (uart_rx_tail + 1) % UART_LONG_BUF_SIZE;
 
     //start the timeout timer when the data is detected, not when it arrives
     FIX_TIMER_TRIGGER(ctrl_uart_tot);
@@ -427,7 +430,7 @@ void interface_resp_short(uint8_t cid, const uint8_t *resp, uint16_t pld_len)
     }
 }
 
-/*void interface_resp_long(enum cmd_t cid, const uint8_t *resp, uint16_t pld_len)
+void interface_resp_long(uint8_t cid, const uint8_t *resp, uint16_t pld_len)
 {
 	uint16_t len = pld_len+3;
 
@@ -452,25 +455,32 @@ void interface_resp_short(uint8_t cid, const uint8_t *resp, uint16_t pld_len)
     if (!txq_busy && !bsbq_busy)
     {
     	bsbq_busy = 1;
-        HAL_UART_Transmit_DMA(&huart1, bsbq[bsbq_tail].data, bsbq[bsbq_tail].len);
+        HAL_UART_Transmit_DMA(ctrl_uart, bsbq[bsbq_tail].data, bsbq[bsbq_tail].len);
     }
-}*/
+}
 
-/*void interface_resp_byte(enum cmd_t cmd, uint8_t resp)
+void interface_resp_byte(enum cmd_t cmd, uint8_t resp)
 {
 	//single-byte response (4 bytes total)
 	interface_resp_short(cmd, &resp, 1);
-}*/
+}
 
 void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 {
+	//float f_val;
+	//int8_t i8_val;
+	uint8_t u8_val;
+	int16_t i16_val;
+	uint32_t u32_val;
+
 	switch (cid)
 	{
 		case CMD_PING:
 			interface_resp_short(cid, (uint8_t*)&dev_err, sizeof(dev_err));
 		break;
 
-/*		case CMD_SET_RX_FREQ:
+		case CMD_SET_RX_FREQ:
+		{
 			if (pld_len == sizeof(uint32_t))
 			{
 				memcpy((uint8_t*)&u32_val, pld, sizeof(uint32_t));
@@ -483,13 +493,14 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 			if(u32_val>=420e6 && u32_val<=450e6)
 			{
-				trx_data.rx_frequency = u32_val;
+				trx_data[CHIP_RX].freq = u32_val;
 				interface_resp_byte(cid, ERR_OK);
 			}
 			else
 			{
 				interface_resp_byte(cid, ERR_RANGE);
 			}
+		}
 		break;
 
 		case CMD_SET_TX_FREQ:
@@ -505,7 +516,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 			if(u32_val>=420e6 && u32_val<=450e6)
 			{
-				trx_data.tx_frequency = u32_val;
+				trx_data[CHIP_TX].freq = u32_val;
 				interface_resp_byte(cid, ERR_OK);
 			}
 			else
@@ -517,7 +528,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 		case CMD_SET_TX_POWER:
 			if (pld_len == 1)
 			{
-				i8_val = *(int8_t*)pld;
+				u8_val = pld[0]; //value in dBm
 			}
 			else
 			{
@@ -525,12 +536,9 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 				break;
 			}
 
-			f_val = i8_val*0.25f; //convert TX power to dBm
-			if(f_val>=-16.0f && f_val<=14.0) //-16 to 14 dBm (raw values of 0x03 to 0x3F)
+			if(u8_val>=30 && u8_val<=47) //30 to 47 dBm
 			{
-				trx_data.pwr = floorf((f_val+18.0f)*2.0f-1.0f);
-				//power setting is now stored in the struct
-				//the change will be applied at the next RX->TX switch
+				rru_settings.tx_pwr_dbm = (float)u8_val;
 				interface_resp_byte(cid, ERR_OK);
 			}
 			else
@@ -539,7 +547,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 			}
 		break;
 
-	  	case CMD_SET_FREQ_CORR:
+	  	case CMD_SET_RX_FREQ_CORR:
 	  		if (pld_len == sizeof(int16_t))
 	  		{
 	  			memcpy((uint8_t*)&i16_val, pld, sizeof(int16_t));
@@ -552,7 +560,29 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 			if(i16_val>=-200 && i16_val<=200) //keep it within a sane range
 			{
-				trx_data.fcorr = i16_val;
+				trx_data[CHIP_RX].fcorr = i16_val;
+				interface_resp_byte(cid, ERR_OK);
+			}
+			else
+			{
+				interface_resp_byte(cid, ERR_RANGE);
+			}
+		break;
+
+	  	case CMD_SET_TX_FREQ_CORR:
+	  		if (pld_len == sizeof(int16_t))
+	  		{
+	  			memcpy((uint8_t*)&i16_val, pld, sizeof(int16_t));
+	  		}
+	  		else
+	  		{
+	  			interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			break;
+	  		}
+
+			if(i16_val>=-200 && i16_val<=200) //keep it within a sane range
+			{
+				trx_data[CHIP_TX].fcorr = i16_val;
 				interface_resp_byte(cid, ERR_OK);
 			}
 			else
@@ -573,25 +603,28 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  		}
 
 	  		//the change will be applied at the next TX->RX switch
-			trx_data.afc = u8_val==0 ? 0 : 1;
+			trx_data[CHIP_RX].afc = u8_val==0 ? 0 : 1;
 			interface_resp_byte(cid, ERR_OK);
 		break;
 
-	  	  case CMD_TX_START:
-	  		  if (pld_len == 1)
-	  		  {
-	  			  u8_val = *pld;
-	  		  }
-	  		  else
-	  		  {
-	  			  interface_resp_byte(cid, ERR_CMD_MALFORM);
-	  			  break;
-	  		  }
+	  	case CMD_TX_START:
+	  		if (pld_len == 1)
+	  		{
+	  			u8_val = *pld;
+	  		}
+	  		else
+	  		{
+	  			interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			break;
+	  		}
 
-	  		  if(u8_val) //start
-	  		  {
-				  if(trx_state==TRX_IDLE && dev_err==ERR_OK)
-				  {
+	  		if(u8_val) //start
+	  		{
+	  			trx_config(CHIP_TX, trx_data[CHIP_TX]);
+	  			set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));
+	  			rf_pa_en(1);
+	  			/*if(trx_state==TRX_IDLE && dev_err==ERR_OK)
+				{
 					  //reset the buffer and state machine
 					  memset(circ_bsb_tx_buff, 0, sizeof(circ_bsb_tx_buff));
 					  circ_bsb_buff_tail = 0;
@@ -619,19 +652,20 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 					  //reply
 					  interface_resp_byte(cid, ERR_OK);
-				  }
-				  else
-				  {
-					  if (dev_err!=ERR_OK)
-	  					  interface_resp_byte(cid, ERR_OTHER);
-					  else
-						  interface_resp_byte(cid, ERR_BUSY);
-				  }
-	  		  }
-	  		  else //stop
-	  		  {
-	  			  if(trx_state==TRX_TX && dev_err==ERR_OK)
-	  			  {
+				}
+				else
+				{
+					if (dev_err!=ERR_OK)
+						interface_resp_byte(cid, ERR_OTHER);
+					else
+						interface_resp_byte(cid, ERR_BUSY);
+				}*/
+	  		}
+	  		else //stop
+	  		{
+	  			rf_pa_en(0);
+	  			/*if(trx_state==TRX_TX && dev_err==ERR_OK)
+				{
 					  //disable external baseband sample triggering
 					  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
 
@@ -653,32 +687,32 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 					  //reply
 					  interface_resp_byte(cid, ERR_OK);
-	  		  	  }
-	  			  else
-	  			  {
-	  				  if (dev_err!=ERR_OK)
-	  					  interface_resp_byte(cid, ERR_OTHER);
-	  				  else
-	  					  interface_resp_byte(cid, ERR_NOP);
-	  			  }
-	  		  }
-		  break;
+				}
+				else
+				{
+					if (dev_err!=ERR_OK)
+						interface_resp_byte(cid, ERR_OTHER);
+					else
+						interface_resp_byte(cid, ERR_NOP);
+				}*/
+	  		}
+	  	break;
 
-	  	  case CMD_RX_START:
-	  		  if (pld_len == 1)
-	  		  {
-	  			  u8_val = *pld;
-	  		  }
-	  		  else
-	  		  {
-	  			  interface_resp_byte(cid, ERR_CMD_MALFORM);
-	  			  break;
-	  		  }
+/*	  	case CMD_RX_START:
+	  		if (pld_len == 1)
+	  		{
+	  			u8_val = *pld;
+	  		}
+	  		else
+	  		{
+	  			interface_resp_byte(cid, ERR_CMD_MALFORM);
+	  			break;
+	  		}
 
-	  		  if(u8_val) //start
-	  		  {
-	  			  if(trx_state==TRX_IDLE && dev_err==ERR_OK)
-	  			  {
+	  		if(u8_val) //start
+	  		{
+	  			if(trx_state==TRX_IDLE && dev_err==ERR_OK)
+	  			{
 	  				  //reset buffers
 	  				  memset(bsb_rx, 0, sizeof(bsb_rx));
 	  				  rx_pend = 0;
@@ -708,19 +742,19 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 	  				  //reply
 	  				  interface_resp_byte(cid, ERR_OK);
-	  			  }
-	  			  else
-	  			  {
-					  if (dev_err!=ERR_OK)
-	  					  interface_resp_byte(cid, ERR_OTHER);
-					  else
-						  interface_resp_byte(cid, ERR_BUSY);
-	  			  }
-	  		  }
-	  		  else //stop
-	  		  {
-	  			  if (trx_state==TRX_RX && dev_err==ERR_OK)
-				  {
+	  			}
+	  			else
+	  			{
+	  				if (dev_err!=ERR_OK)
+	  					interface_resp_byte(cid, ERR_OTHER);
+	  				else
+	  					interface_resp_byte(cid, ERR_BUSY);
+	  			}
+	  		}
+	  		else //stop
+	  		{
+	  			if (trx_state==TRX_RX && dev_err==ERR_OK)
+	  			{
 					  //disable read baseband trigger signal
 					  HAL_TIM_Base_Stop_IT(&htim11);
 
@@ -735,18 +769,18 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 					  //reply
 					  interface_resp_byte(cid, ERR_OK); //OK
-				  }
-	  			  else
-	  			  {
-	  				  if (dev_err!=ERR_OK)
-	  					  interface_resp_byte(cid, ERR_OTHER);
-	  				  else
-	  					  interface_resp_byte(cid, ERR_NOP);
-	  			  }
+	  			}
+	  			else
+	  			{
+	  				if (dev_err!=ERR_OK)
+	  					interface_resp_byte(cid, ERR_OTHER);
+	  				else
+	  					interface_resp_byte(cid, ERR_NOP);
+	  			}
 	  		  }
-		  break;
+	  	break;
 
-	  	  case CMD_TX_DATA:
+	  	case CMD_TX_DATA:
 	  		  if (trx_state==TRX_TX && pld_len==960)
 	  		  {
 	  			  //enough space in the circular buffer?
@@ -772,7 +806,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  				  interface_resp_byte(cid, ERR_BUFF_FULL);
 	  			  }
 	  		  }
-	  	  break;
+	  	  break;*/
 
 	  	  case CMD_GET_IDENT:
 			  //reply with the device's IDENT string
@@ -780,16 +814,16 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 		  break;
 
 	  	  case CMD_GET_CAPS:
-			  //so far, the CC1200-HAT can do FM only, half-duplex
+			  //FM only, half-duplex for now
 			  interface_resp_byte(cid, 0x02);
 		  break;
 
 	  	  case CMD_GET_RX_FREQ:
-	  		  interface_resp_short(cid, (uint8_t*)&trx_data.rx_frequency, sizeof(uint32_t));
+	  		  interface_resp_short(cid, (uint8_t*)&trx_data[CHIP_RX].freq, sizeof(uint32_t));
 		  break;
 
 	  	  case CMD_GET_TX_FREQ:
-	  		  interface_resp_short(cid, (uint8_t*)&trx_data.tx_frequency, sizeof(uint32_t));
+	  		  interface_resp_short(cid, (uint8_t*)&trx_data[CHIP_TX].freq, sizeof(uint32_t));
 		  break;
 
 	  	  case CMD_GET_BSB_BUFF:
@@ -798,9 +832,9 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  	  break;
 
 	  	  case CMD_GET_RSSI:
-	  		  u8_val = trx_read_reg(0x2F71); //RSSI
+	  		  u8_val = trx_read_reg(CHIP_RX, 0x2F71); //RSSI
 	  		  interface_resp_byte(cid, u8_val);
-		  break;*/
+		  break;
 	}
 }
 
@@ -810,16 +844,16 @@ void uart_ctrl_process(void)
 
     while (uart_ctrl_get_byte(&b))
     {
-        switch (uart_ctrl_state)
+        switch (uart_state)
         {
 			case WAIT_ID:
 				cmd_id = b;
-				uart_ctrl_state = WAIT_LEN1;
+				uart_state = WAIT_LEN1;
 			break;
 
 			case WAIT_LEN1:
 				cmd_len = b;
-				uart_ctrl_state = WAIT_LEN2;
+				uart_state = WAIT_LEN2;
 			break;
 
 			case WAIT_LEN2:
@@ -829,10 +863,10 @@ void uart_ctrl_process(void)
 				if (cmd_len == 3)
 				{
 					handle_command(cmd_id, NULL, 0);
-					uart_ctrl_state = WAIT_ID;
+					uart_state = WAIT_ID;
 				}
 				else
-					uart_ctrl_state = WAIT_PAYLOAD;
+					uart_state = WAIT_PAYLOAD;
 			break;
 
 			case WAIT_PAYLOAD:
@@ -841,7 +875,7 @@ void uart_ctrl_process(void)
 				if (payload_pos >= cmd_len - 3)
 				{
 					handle_command(cmd_id, payload, payload_pos);
-					uart_ctrl_state = WAIT_ID;
+					uart_state = WAIT_ID;
 				}
 			break;
         }
@@ -856,7 +890,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	if(tim == TIM6)
 	{
 		HAL_TIM_Base_Stop_IT(ctrl_uart_tot);
-		uart_ctrl_state = WAIT_ID;
+		uart_state = WAIT_ID;
 	}
 }
 
@@ -883,6 +917,59 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 		;
 	}
 }*/
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart == ctrl_uart)
+    {
+    	if (bsbq_busy)
+    	{
+    		bsbq_tail = (bsbq_tail+1) % LONG_TXQ_SIZE;
+
+			//any more messages pending?
+			if (bsbq_tail != bsbq_head)
+			{
+				HAL_UART_Transmit_DMA(huart, bsbq[bsbq_tail].data, bsbq[bsbq_tail].len);
+			}
+			else //TX queue is empty
+			{
+				bsbq_busy = 0;
+			}
+    	}
+
+    	else if (txq_busy)
+    	{
+			txq_tail = (txq_tail+1) % SHORT_TXQ_SIZE;
+
+			//any more messages pending?
+			if (txq_tail != txq_head)
+			{
+				HAL_UART_Transmit_DMA(huart, txq[txq_tail].data, txq[txq_tail].len);
+			}
+			else //TX queue is empty
+			{
+				txq_busy = 0;
+			}
+    	}
+
+    	//continue the transmission if there's data in the other queue
+        if (!bsbq_busy && bsbq_tail != bsbq_head)
+        {
+            //start next long packet
+            bsbq_busy = 1;
+            HAL_UART_Transmit_DMA(huart, bsbq[bsbq_tail].data, bsbq[bsbq_tail].len);
+            return;
+        }
+
+        if (!txq_busy && txq_tail != txq_head)
+        {
+            //start next short packet
+            txq_busy = 1;
+            HAL_UART_Transmit_DMA(huart, txq[txq_tail].data, txq[txq_tail].len);
+            return;
+        }
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -980,6 +1067,19 @@ int main(void)
 		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
 		  HAL_Delay(1000);
 	  }
+  }
+
+  while(0) //PA test 3
+  {
+	  rf_pa_en(0);
+	  set_rf_pwr_setpoint(0);
+	  HAL_Delay(1000);
+	  set_rf_pwr_setpoint(1024);
+	  HAL_Delay(1000);
+	  set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm)); //~2200
+	  HAL_Delay(1000);
+	  set_rf_pwr_setpoint(4095);
+	  HAL_Delay(1000);
   }
 
   while(0) //temp test

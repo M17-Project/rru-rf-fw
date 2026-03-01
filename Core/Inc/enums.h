@@ -73,7 +73,7 @@ enum int_state_t
 	STATE_TX_FIFO_ERR
 };
 
-enum uart_ctrl_state_t
+enum uart_state_t
 {
     WAIT_ID,
     WAIT_LEN1,
