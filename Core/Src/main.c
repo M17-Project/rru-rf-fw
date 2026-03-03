@@ -106,6 +106,8 @@ trx_data_t trx_data[2];
 
 uint32_t dev_err; //default state - no error
 
+uint8_t trx_state = TRX_IDLE;
+
 //ADC stuff
 volatile uint16_t adc_vals[3]; //raw values read from ADC channels 0, 1, and 2
 
@@ -152,9 +154,9 @@ volatile uint8_t bsbq_head;
 volatile uint8_t bsbq_tail;
 volatile uint8_t bsbq_busy;
 
-/*uint8_t bsb_rx[2*BSB_SIZE];								//rx samples
+uint8_t bsb_rx[2*BSB_SIZE];								//rx samples
 volatile uint8_t rx_pend;								//pending rx sample read?
-uint16_t rx_num_wr;*/
+uint16_t rx_num_wr;
 
 uint8_t circ_bsb_tx_buff[BSB_TX_BUFF_SIZE];
 volatile uint16_t circ_bsb_buff_tail;
@@ -317,7 +319,7 @@ void platform_init(void)
 	trx_data[CHIP_TX].freq = 435000000;
 	trx_data[CHIP_RX].fcorr = 0;
 	trx_data[CHIP_TX].fcorr = 0;
-	trx_data[CHIP_TX].pwr = 27;									//3 to 63
+	trx_data[CHIP_TX].pwr = 60;									//3 to 63
 	rru_settings.tx_pwr_dbm = 30.00f;							//30dBm (1W) default
 	set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));	//set the DAC for RF power setpoint
 
@@ -360,8 +362,13 @@ void platform_init(void)
 		dev_err|=(1UL<<ERR_TX_SPI);
 	}
 
+	//enable RX briefly to start the 24kHz signal
 	trx_write_cmd(CHIP_RX, STR_SRX);
-	trx_write_cmd(CHIP_TX, STR_STX);
+	HAL_Delay(100);
+
+	//set RX/TX to idle
+	trx_write_cmd(CHIP_RX, STR_IDLE);
+	trx_write_cmd(CHIP_TX, STR_IDLE);
 
 	//dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_read_reg(CHIP_TX, STR_SNOP)>>4);
 	//dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
@@ -620,38 +627,33 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 	  		if(u8_val) //start
 	  		{
-	  			trx_config(CHIP_TX, trx_data[CHIP_TX]);
-	  			set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));
-	  			rf_pa_en(1);
-	  			/*if(trx_state==TRX_IDLE && dev_err==ERR_OK)
+	  			if(trx_state==TRX_IDLE && dev_err==ERR_OK)
 				{
-					  //reset the buffer and state machine
-					  memset(circ_bsb_tx_buff, 0, sizeof(circ_bsb_tx_buff));
-					  circ_bsb_buff_tail = 0;
-					  circ_bsb_buff_head = 0;
+					//reset the buffer and state machine
+					memset(circ_bsb_tx_buff, 0, sizeof(circ_bsb_tx_buff));
+					circ_bsb_buff_tail = 0;
+					circ_bsb_buff_head = 0;
 
-					  //config CC1200
-					  trx_state = TRX_TX;
-					  trx_config(MODE_TX, trx_data);
-					  HAL_Delay(10);
+	  				//config CC1200
+		  			trx_config(CHIP_TX, trx_data[CHIP_TX]);
+		  			HAL_Delay(100);
 
-					  //switch CC1200 to TX
-					  trx_write_cmd(STR_STX);
+		  			//switch CC1200 to TX
+		  			trx_write_cmd(CHIP_TX, STR_STX);
 
-					  //initiate samples transfer (write)
-					  uint8_t header[2]={0x2F|0x40, 0x7E}; //CFM_TX_DATA_IN, burst access
-					  trx_set_CS(0); //CS low
-					  HAL_SPI_Transmit(&hspi1, header, 2, 2); //send 2-byte header
+		  			//switch state
+	  				trx_state = TRX_TX;
 
-					  //signal TX state with LEDs
-					  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 1);
-					  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 0);
+					//enable external baseband sample triggering
+					HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-					  //enable external baseband sample triggering
-					  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+		  			//enable RF PA
+		  			//set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));
+		  			HAL_Delay(50);
+		  			rf_pa_en(1);
 
-					  //reply
-					  interface_resp_byte(cid, ERR_OK);
+					//reply
+					interface_resp_byte(cid, ERR_OK);
 				}
 				else
 				{
@@ -659,34 +661,26 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 						interface_resp_byte(cid, ERR_OTHER);
 					else
 						interface_resp_byte(cid, ERR_BUSY);
-				}*/
+				}
 	  		}
 	  		else //stop
 	  		{
-	  			rf_pa_en(0);
-	  			/*if(trx_state==TRX_TX && dev_err==ERR_OK)
+	  			if(trx_state==TRX_TX && dev_err==ERR_OK)
 				{
-					  //disable external baseband sample triggering
-					  HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+	  				//disable RF PA
+	  				rf_pa_en(0);
 
-					  //finalize samples transfer
-					  trx_set_CS(1); //CS high
+					//disable external baseband sample triggering
+					HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
 
-					  //switch state
-					  trx_state = TRX_IDLE;
+					//switch state
+					trx_state = TRX_IDLE;
 
-					  //config CC1200
-					  trx_config(MODE_RX, trx_data);
-					  HAL_Delay(10);
+					//switch CC1200 to IDLE state
+					trx_write_cmd(CHIP_TX, STR_IDLE);
 
-					  //switch CC1200 to RX state
-					  trx_write_cmd(STR_SRX);
-
-					  //turn off the TX LED
-					  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
-
-					  //reply
-					  interface_resp_byte(cid, ERR_OK);
+					//reply
+					interface_resp_byte(cid, ERR_OK);
 				}
 				else
 				{
@@ -694,11 +688,11 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 						interface_resp_byte(cid, ERR_OTHER);
 					else
 						interface_resp_byte(cid, ERR_NOP);
-				}*/
+				}
 	  		}
 	  	break;
 
-/*	  	case CMD_RX_START:
+	  	case CMD_RX_START:
 	  		if (pld_len == 1)
 	  		{
 	  			u8_val = *pld;
@@ -713,35 +707,24 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  		{
 	  			if(trx_state==TRX_IDLE && dev_err==ERR_OK)
 	  			{
-	  				  //reset buffers
-	  				  memset(bsb_rx, 0, sizeof(bsb_rx));
-	  				  rx_pend = 0;
-	  				  rx_num_wr = 0;
+	  				//reset buffers
+	  				memset(bsb_rx, 0, sizeof(bsb_rx));
+	  				rx_pend = 0;
+	  				rx_num_wr = 0;
 
-	  				  //config CC1200
-	  				  trx_config(MODE_RX, trx_data);
-	  				  HAL_Delay(10);
+	  				//config CC1200
+	  				trx_config(CHIP_RX, trx_data[CHIP_RX]);
+	  				HAL_Delay(10);
 
-	  				  //switch CC1200 to RX
-	  				  trx_write_cmd(STR_SRX);
-	  				  trx_state = TRX_RX;
+	  				//switch CC1200 to RX
+	  				trx_write_cmd(CHIP_RX, STR_SRX);
+	  				trx_state = TRX_RX;
 
-	  				  //initiate samples transfer (readout)
-	  				  uint8_t header[2] = {0x2F|0xC0, 0x7D};	//CFM_RX_DATA_OUT, burst access
-	  				  trx_set_CS(0);							//CS low
-	  				  HAL_SPI_Transmit(&hspi1, header, 2, 10);	//send 2-byte header
+	  				//enable 24kHz trigger (TODO: check if this works if RX is issued before TX)
+	  				HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-	  				  //for some reason, the external signal runs at 75.7582kHz instead of expected 24kHz
-	  				  FIX_TIMER_TRIGGER(&htim11);
-	  				  TIM11->CNT = 0;
-	  				  HAL_TIM_Base_Start_IT(&htim11);
-
-	  				  //signal RX state with LEDs
-	  				  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 1);
-	  				  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
-
-	  				  //reply
-	  				  interface_resp_byte(cid, ERR_OK);
+	  				//reply
+	  				interface_resp_byte(cid, ERR_OK);
 	  			}
 	  			else
 	  			{
@@ -756,16 +739,11 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  			if (trx_state==TRX_RX && dev_err==ERR_OK)
 	  			{
 					  //disable read baseband trigger signal
-					  HAL_TIM_Base_Stop_IT(&htim11);
-
-					  //finalize SPI samples transfer
-					  trx_set_CS(1);
+					  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
 
 					  //switch device state
+					  trx_write_cmd(CHIP_RX, STR_IDLE);
 					  trx_state = TRX_IDLE;
-
-					  //turn off the RX LED
-					  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 0);
 
 					  //reply
 					  interface_resp_byte(cid, ERR_OK); //OK
@@ -806,7 +784,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  				  interface_resp_byte(cid, ERR_BUFF_FULL);
 	  			  }
 	  		  }
-	  	  break;*/
+	  	  break;
 
 	  	  case CMD_GET_IDENT:
 			  //reply with the device's IDENT string
@@ -826,6 +804,10 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  		  interface_resp_short(cid, (uint8_t*)&trx_data[CHIP_TX].freq, sizeof(uint32_t));
 		  break;
 
+	  	  case CMD_GET_TX_POWER:
+	  		  ;
+		  break;
+
 	  	  case CMD_GET_BSB_BUFF:
 	  		  //TODO: put some working code here
 	  		  interface_resp_byte(cid, 0);
@@ -834,6 +816,16 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  	  case CMD_GET_RSSI:
 	  		  u8_val = trx_read_reg(CHIP_RX, 0x2F71); //RSSI
 	  		  interface_resp_byte(cid, u8_val);
+		  break;
+
+	  	  case 0xA0: // debug command only
+	  	  {
+	  		  char msg[128];
+	  		  float fwd, ref, temp;
+	  		  get_meas_vals(&fwd, &ref, &temp);
+	  		  sprintf(msg, "FWD %.1fdBm REF %.1fdBm, TEMP %.1f*C\n", fwd, ref, temp);
+	  		  HAL_UART_Transmit(ctrl_uart, (uint8_t*)msg, strlen(msg), 100);
+	  	  }
 		  break;
 	}
 }
@@ -899,11 +891,32 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	//24kHz trigger signal from the RX CC1200
 	if(GPIO_Pin == TX_TRIG_Pin)
 	{
-		set_TP(TP1, 1);
+		//HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
 
-		;
+		if (trx_state == TRX_TX)
+		{
+			trx_set_CS(CHIP_TX, 0);
+	        if (circ_bsb_buff_tail != circ_bsb_buff_head)
+	        {
+	        	uint8_t b[3] = {0x2F, 0x7E, circ_bsb_tx_buff[circ_bsb_buff_tail]};
+	            HAL_SPI_Transmit(&hspi1, b, 3, 2);
+	            circ_bsb_buff_tail = (circ_bsb_buff_tail + 1) % BSB_TX_BUFF_SIZE;
+	        }
+	        else
+	        {
+	            //buffer empty, send zeros
+	        	uint8_t b[3] = {0x2F, 0x7E, 0};
+	            HAL_SPI_Transmit(&hspi1, b, 3, 2);
+	        }
+	        trx_set_CS(CHIP_TX, 1);
+		}
 
-		set_TP(TP1, 0);
+		//TODO: this is half duplex!
+		else //if (trx_state == TRX_RX)
+		{
+			//pending RX baseband sample retrieval
+			rx_pend = 1;
+		}
 	}
 }
 
@@ -1016,144 +1029,35 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  /*while(0) //PA test
-  {
-	  float fwd=0.0, ref=0.0, temp=0.0, swr=0.0;
-
-	  set_rf_pwr_setpoint(0);
-	  HAL_Delay(1000);
-	  //get_rf_pwr_dbm(&fwd, &ref);
-	  //swr=calc_swr(fwd, ref);
-	  //dbg_print(0, "FWD=%2.1fdBm REF=%2.1fdBm, SWR=%-.--f\n", fwd, ref);
-
-	  set_rf_pwr_setpoint(2500);
-	  HAL_Delay(5000);
-	  get_adc_vals(&fwd, &ref, &temp);
-	  swr=calc_swr(fwd, ref);
-	  if(fwd>=27.0)
-		  dbg_print(0, "FWD=%2.1fdBm REF=%2.1fdBm SWR=%2.2f T=%3.1f\n", fwd, ref, swr, temp);
-	  else
-		  dbg_print(0, "FWD=--.-dBm REF=--.-fdBm SWR=--.- T=%3.1f\n", temp);
-  }
-
-  while(0) //PA test 2
-  {
-	  trx_writecmd(CHIP_TX, STR_IDLE);
-	  HAL_Delay(10);
-	  trx_data[CHIP_TX].frequency=438812500;
-	  //trx_data[CHIP_TX].pwr=63;
-	  config_rf(CHIP_TX, trx_data[CHIP_TX]);
-	  HAL_Delay(10);
-	  trx_writecmd(CHIP_TX, STR_STX);
-	  //set_rf_pwr_setpoint(1200); //14.35dBm
-	  //set_rf_pwr_setpoint(1500); //21.85-
-	  //set_rf_pwr_setpoint(1700); //26
-	  //set_rf_pwr_setpoint(2000); //33.6-
-	  //set_rf_pwr_setpoint(2200); //37.6
-	  //set_rf_pwr_setpoint(2300); //39.8
-	  //set_rf_pwr_setpoint(2500); //45.15-
-	  //set_rf_pwr_setpoint(2600); //46.1
-	  //set_rf_pwr_setpoint(dbm_to_alc(37));
-
-	  rf_pa_en(1);
-
-	  while(1)
-	  {
-		  //trx_data[CHIP_TX].pwr=63;
-		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
-		  HAL_Delay(1000);
-
-		  //trx_data[CHIP_TX].pwr=3;
-		  //trx_writereg(CHIP_TX, 0x002B, trx_data[CHIP_TX].pwr);
-		  HAL_Delay(1000);
-	  }
-  }
-
-  while(0) //PA test 3
-  {
-	  rf_pa_en(0);
-	  set_rf_pwr_setpoint(0);
-	  HAL_Delay(1000);
-	  set_rf_pwr_setpoint(1024);
-	  HAL_Delay(1000);
-	  set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm)); //~2200
-	  HAL_Delay(1000);
-	  set_rf_pwr_setpoint(4095);
-	  HAL_Delay(1000);
-  }
-
-  while(0) //temp test
-  {
-	  float temp=0.0;
-
-	  get_adc_vals(NULL, NULL, &temp);
-	  dbg_print(0, "T=%3.1f\n", temp);
-	  HAL_Delay(500);
-  }
-
-  while(0) //RX test
-  {
-	  uint8_t val=trx_readreg(CHIP_RX, 0x2F7D);
-	  //HAL_UART_Transmit(&huart3, &val, 1, 10);
-	  set_dac_ch2((int8_t)val*31+2048);
-  }
-
-  while(0) //CC1200 TX output test
-  {
-	  trx_data[CHIP_TX].fcorr=roundf(-4000.0f/FCORR_STEP);
-	  trx_writereg(CHIP_TX, 0x2F0A, (uint16_t)trx_data[CHIP_TX].fcorr>>8);
-	  trx_writereg(CHIP_TX, 0x2F0B, (uint16_t)trx_data[CHIP_TX].fcorr&0xFF);
-
-	  while(1)
-	  {
-		  trx_writecmd(CHIP_TX, STR_STX);
-		  set_rf_pwr_setpoint(dbm_to_alc(30));
-		  rf_pa_en(1);
-		  HAL_Delay(1000);
-
-		  set_rf_pwr_setpoint(0);
-		  rf_pa_en(0);
-		  trx_writecmd(CHIP_TX, STR_IDLE);
-		  HAL_Delay(1000);
-	  }
-  }
-
-  while(0) //CC1200 PLL test
-  {
-	  set_rf_pwr_setpoint(dbm_to_alc(47));
-
-	  while(1)
-	  {
-		  //for(uint32_t f=430e6; f<=440e6; f+=1e6)
-		  for(uint32_t f=435e6; f<=440e6; )
-		  {
-			  rf_pa_en(0);
-			  uint32_t freq_word=roundf((float)f/5000000.0*((uint32_t)1<<16));
-			  trx_writecmd(CHIP_TX, STR_IDLE);
-			  trx_writereg(CHIP_TX, 0x2F0C, (freq_word>>16)&0xFF);
-			  trx_writereg(CHIP_TX, 0x2F0D, (freq_word>>8)&0xFF);
-			  trx_writereg(CHIP_TX, 0x2F0E, freq_word&0xFF);
-			  HAL_Delay(10);
-			  trx_writecmd(CHIP_TX, STR_STX);
-			  HAL_Delay(10);
-			  rf_pa_en(1);
-			  //dbg_print(0, "f=%ld sta=%d\n", f, trx_readreg(CHIP_TX, STR_SNOP)>>4);
-			  HAL_Delay(1000);
-			  //for(int8_t i=-63; i<=63; i++)
-			  while(1)
-			  {
-				  //trx_writereg(CHIP_TX, 0x2F7E, 256-63);
-				  //HAL_Delay(10);
-				  //trx_writereg(CHIP_TX, 0x2F7E, 63);
-				  //HAL_Delay(10);
-			  }
-		  }
-	  }
-  }*/
-
   while(1)
   {
 	uart_ctrl_process();
+
+	if (rx_pend)
+	{
+		//initiate samples transfer (readout) TODO: this is half-duplex!
+		trx_set_CS(CHIP_RX, 0);
+		uint8_t d[3] = {0x2F, 0x7D, 0x00}; //CFM_RX_DATA_OUT, single access
+		uint8_t v[3] = {0};
+		HAL_SPI_TransmitReceive(&hspi1, d, v, 3, 2);
+		trx_set_CS(CHIP_RX, 1);
+
+		bsb_rx[rx_num_wr] = v[2];
+		rx_num_wr++;
+
+		//send a chunk of samples when ready
+		if (rx_num_wr == BSB_SIZE)
+		{
+			interface_resp_long(CMD_RX_DATA, &bsb_rx[0], BSB_SIZE);
+		}
+		else if (rx_num_wr == 2*BSB_SIZE)
+		{
+			interface_resp_long(CMD_RX_DATA, &bsb_rx[BSB_SIZE], BSB_SIZE);
+		}
+
+		rx_num_wr %= 2*BSB_SIZE;
+		rx_pend = 0;
+	}
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -1600,7 +1504,7 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  //HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //immediately disable it, as we don't need it right away
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn); //immediately disable it, as we don't need it right away
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
