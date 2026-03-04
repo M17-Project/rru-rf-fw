@@ -49,7 +49,7 @@
 #define SHORT_TXQ_SIZE			8							//TX queue length (short messages)
 #define LONG_TXQ_SIZE   		2							//TX queue length (baseband transfers)
 #define BSB_SIZE				960							//size of baseband chunks
-#define BSB_TX_BUFF_SIZE		(10*BSB_SIZE)				//large buffer for baseband
+#define BSB_TX_BUFF_SIZE		(40*BSB_SIZE)				//large buffer for baseband
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -153,6 +153,9 @@ bsbq_queue_t bsbq[LONG_TXQ_SIZE];						//TX queue - long packets
 volatile uint8_t bsbq_head;
 volatile uint8_t bsbq_tail;
 volatile uint8_t bsbq_busy;
+
+volatile uint8_t tx_pend;								//pending tx sample write?
+volatile uint8_t tx_active;
 
 uint8_t bsb_rx[2*BSB_SIZE];								//rx samples
 volatile uint8_t rx_pend;								//pending rx sample read?
@@ -528,9 +531,10 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 		break;
 
 		case CMD_SET_TX_POWER:
+		{
 			if (pld_len == 1)
 			{
-				u8_val = pld[0]; //value in dBm
+				u8_val = pld[0];
 			}
 			else
 			{
@@ -538,15 +542,18 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 				break;
 			}
 
-			if(u8_val>=30 && u8_val<=47) //30 to 47 dBm
+			float pwr_sp = u8_val / 4.0f; //value in dBm*4
+
+			if(pwr_sp>=30.0f && pwr_sp<=47.0f) //30 to 47 dBm
 			{
-				rru_settings.tx_pwr_dbm = (float)u8_val;
+				rru_settings.tx_pwr_dbm = pwr_sp;
 				interface_resp_byte(cid, ERR_OK);
 			}
 			else
 			{
 				interface_resp_byte(cid, ERR_RANGE);
 			}
+		}
 		break;
 
 	  	case CMD_SET_RX_FREQ_CORR:
@@ -630,20 +637,21 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 					circ_bsb_buff_head = 0;
 
 	  				//config CC1200
-					trx_data[CHIP_TX].pwr = 27; //TODO: replace this with a valid digital ALC
+					/*trx_data[CHIP_TX].pwr = 13 + (rru_settings.tx_pwr_dbm-30)*2; //TODO: fix this!
 		  			trx_config(CHIP_TX, trx_data[CHIP_TX]);
 		  			HAL_Delay(10);
-		  			trx_write_cmd(CHIP_TX, STR_STX);
+		  			trx_write_cmd(CHIP_TX, STR_STX);*/
 
 		  			//switch state
 	  				trx_state = TRX_TX;
-
-					//enable external baseband sample triggering
-					HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+	  				tx_active = 0;
 
 		  			//enable RF PA
-		  			HAL_Delay(50);
-		  			rf_pa_en(1);
+		  			/*HAL_Delay(50);
+		  			rf_pa_en(1);*/
+
+					//enable external baseband sample triggering
+					//HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
 					//reply
 					interface_resp_byte(cid, ERR_OK);
@@ -660,6 +668,9 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  		{
 	  			if(trx_state==TRX_TX && dev_err==ERR_OK)
 				{
+					//disable external baseband sample triggering
+					HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+
 	  				//disable RF PA
 	  				rf_pa_en(0);
 
@@ -669,11 +680,9 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 					HAL_Delay(10);
 					trx_write_cmd(CHIP_TX, STR_STX);
 
-					//disable external baseband sample triggering
-					HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
-
 					//switch state
 					trx_state = TRX_IDLE;
+					tx_active = 0;
 
 					//reply
 					interface_resp_byte(cid, ERR_OK);
@@ -774,6 +783,23 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  				  }
 
 					  circ_bsb_buff_head = (circ_bsb_buff_head+960) % BSB_TX_BUFF_SIZE;
+
+					  uint16_t fill = (circ_bsb_buff_head - circ_bsb_buff_tail + BSB_TX_BUFF_SIZE) % BSB_TX_BUFF_SIZE;
+					  if (fill >= 20 * BSB_SIZE && tx_active == 0)
+					  {
+						  trx_data[CHIP_TX].pwr = 13 + (rru_settings.tx_pwr_dbm-30)*2; //TODO: fix this!
+						  trx_config(CHIP_TX, trx_data[CHIP_TX]);
+						  HAL_Delay(10);
+						  trx_write_cmd(CHIP_TX, STR_STX);
+
+						  rf_pa_en(1);
+
+						  //enable baseband trigger
+						  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
+						  tx_active = 1;
+					  }
+
 					  interface_resp_byte(cid, ERR_OK);
 	  			  }
 	  			  else
@@ -888,25 +914,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	//24kHz trigger signal from the RX CC1200
 	if(GPIO_Pin == TX_TRIG_Pin)
 	{
-		HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
+		//HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
 
 		if (trx_state == TRX_TX)
 		{
-			trx_set_CS(CHIP_TX, 0);
-	        if (circ_bsb_buff_tail != circ_bsb_buff_head)
-	        {
-	        	//CFM_RX_DATA_IN, write - single byte
-	        	uint8_t b[3] = {0x2F, 0x7E, circ_bsb_tx_buff[circ_bsb_buff_tail]};
-	            HAL_SPI_Transmit(&hspi1, b, 3, 2);
-	            circ_bsb_buff_tail = (circ_bsb_buff_tail + 1) % BSB_TX_BUFF_SIZE;
-	        }
-	        else
-	        {
-	            //buffer empty, send zeros
-	        	uint8_t b[3] = {0x2F, 0x7E, 0}; //CFM_RX_DATA_IN, write - single byte
-	            HAL_SPI_Transmit(&hspi1, b, 3, 2);
-	        }
-	        trx_set_CS(CHIP_TX, 1);
+			tx_pend = 1;
 		}
 
 		//TODO: this is half duplex!
@@ -1055,6 +1067,27 @@ int main(void)
 
 		rx_num_wr %= 2*BSB_SIZE;
 		rx_pend = 0;
+	}
+
+	if (tx_pend)
+	{
+		trx_set_CS(CHIP_TX, 0);
+        if (circ_bsb_buff_tail != circ_bsb_buff_head)
+        {
+        	//CFM_RX_DATA_IN, write - single byte
+        	uint8_t b[3] = {0x2F, 0x7E, circ_bsb_tx_buff[circ_bsb_buff_tail]};
+            HAL_SPI_Transmit(&hspi1, b, 3, 2);
+            circ_bsb_buff_tail = (circ_bsb_buff_tail + 1) % BSB_TX_BUFF_SIZE;
+        }
+        else
+        {
+            //buffer empty, send zeros
+        	uint8_t b[3] = {0x2F, 0x7E, 0}; //CFM_RX_DATA_IN, write - single byte
+            HAL_SPI_Transmit(&hspi1, b, 3, 2);
+        }
+        trx_set_CS(CHIP_TX, 1);
+
+		tx_pend = 0;
 	}
     /* USER CODE END WHILE */
 
