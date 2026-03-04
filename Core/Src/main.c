@@ -632,7 +632,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  				//config CC1200
 					trx_data[CHIP_TX].pwr = 27; //TODO: replace this with a valid digital ALC
 		  			trx_config(CHIP_TX, trx_data[CHIP_TX]);
-		  			HAL_Delay(50);
+		  			HAL_Delay(10);
 		  			trx_write_cmd(CHIP_TX, STR_STX);
 
 		  			//switch state
@@ -666,7 +666,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 					//set CC1200 to low RF power
 					trx_data[CHIP_TX].pwr = 3;
 					trx_config(CHIP_TX, trx_data[CHIP_TX]);
-					HAL_Delay(50);
+					HAL_Delay(10);
 					trx_write_cmd(CHIP_TX, STR_STX);
 
 					//disable external baseband sample triggering
@@ -710,10 +710,11 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 	  				//config CC1200
 	  				trx_config(CHIP_RX, trx_data[CHIP_RX]);
-	  				HAL_Delay(50);
+	  				HAL_Delay(10);
 
 	  				//switch to RX
 	  				trx_write_cmd(CHIP_RX, STR_SRX);
+	  				HAL_Delay(10);
 	  				trx_state = TRX_RX;
 
 	  				//enable 24kHz trigger (TODO: check if this works if RX is issued before TX)
@@ -894,6 +895,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 			trx_set_CS(CHIP_TX, 0);
 	        if (circ_bsb_buff_tail != circ_bsb_buff_head)
 	        {
+	        	//CFM_RX_DATA_IN, write - single byte
 	        	uint8_t b[3] = {0x2F, 0x7E, circ_bsb_tx_buff[circ_bsb_buff_tail]};
 	            HAL_SPI_Transmit(&hspi1, b, 3, 2);
 	            circ_bsb_buff_tail = (circ_bsb_buff_tail + 1) % BSB_TX_BUFF_SIZE;
@@ -901,7 +903,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	        else
 	        {
 	            //buffer empty, send zeros
-	        	uint8_t b[3] = {0x2F, 0x7E, 0};
+	        	uint8_t b[3] = {0x2F, 0x7E, 0}; //CFM_RX_DATA_IN, write - single byte
 	            HAL_SPI_Transmit(&hspi1, b, 3, 2);
 	        }
 	        trx_set_CS(CHIP_TX, 1);
@@ -1033,7 +1035,7 @@ int main(void)
 	{
 		//initiate samples transfer (readout) TODO: this is half-duplex!
 		trx_set_CS(CHIP_RX, 0);
-		uint8_t d[3] = {0x2F, 0x7D, 0x00}; //CFM_RX_DATA_OUT, single access
+		uint8_t d[3] = {0x2F|0x80, 0x7D, 0x00}; //CFM_RX_DATA_OUT, read - single byte
 		uint8_t v[3] = {0};
 		HAL_SPI_TransmitReceive(&hspi1, d, v, 3, 2);
 		trx_set_CS(CHIP_RX, 1);
