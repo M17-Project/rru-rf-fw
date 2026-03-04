@@ -319,9 +319,8 @@ void platform_init(void)
 	trx_data[CHIP_TX].freq = 435000000;
 	trx_data[CHIP_RX].fcorr = 0;
 	trx_data[CHIP_TX].fcorr = 0;
-	trx_data[CHIP_TX].pwr = 60;									//3 to 63
+	trx_data[CHIP_TX].pwr = 3;									//3 to 63
 	rru_settings.tx_pwr_dbm = 30.00f;							//30dBm (1W) default
-	set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));	//set the DAC for RF power setpoint
 
 	dbg_print(0, "Starting TRX config...");
 	trx_config(CHIP_RX, trx_data[CHIP_RX]);
@@ -362,13 +361,9 @@ void platform_init(void)
 		dev_err|=(1UL<<ERR_TX_SPI);
 	}
 
-	//enable RX briefly to start the 24kHz signal
-	trx_write_cmd(CHIP_RX, STR_SRX);
-	HAL_Delay(100);
-
-	//set RX/TX to idle
+	//set RX/TX to idle/TX
 	trx_write_cmd(CHIP_RX, STR_IDLE);
-	trx_write_cmd(CHIP_TX, STR_IDLE);
+	trx_write_cmd(CHIP_TX, STR_STX);
 
 	//dbg_print(TERM_YELLOW, "[DBG] TX status %01X\n", trx_read_reg(CHIP_TX, STR_SNOP)>>4);
 	//dbg_print(TERM_YELLOW, "[DBG] UART1 BRR: %08X\n", huart1.Instance->BRR);
@@ -635,10 +630,9 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 					circ_bsb_buff_head = 0;
 
 	  				//config CC1200
+					trx_data[CHIP_TX].pwr = 27; //TODO: replace this with a valid digital ALC
 		  			trx_config(CHIP_TX, trx_data[CHIP_TX]);
-		  			HAL_Delay(100);
-
-		  			//switch CC1200 to TX
+		  			HAL_Delay(50);
 		  			trx_write_cmd(CHIP_TX, STR_STX);
 
 		  			//switch state
@@ -648,7 +642,6 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 					HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
 		  			//enable RF PA
-		  			//set_rf_pwr_setpoint(dbm_to_alc(rru_settings.tx_pwr_dbm));
 		  			HAL_Delay(50);
 		  			rf_pa_en(1);
 
@@ -670,14 +663,17 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 	  				//disable RF PA
 	  				rf_pa_en(0);
 
+					//set CC1200 to low RF power
+					trx_data[CHIP_TX].pwr = 3;
+					trx_config(CHIP_TX, trx_data[CHIP_TX]);
+					HAL_Delay(50);
+					trx_write_cmd(CHIP_TX, STR_STX);
+
 					//disable external baseband sample triggering
 					HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
 
 					//switch state
 					trx_state = TRX_IDLE;
-
-					//switch CC1200 to IDLE state
-					trx_write_cmd(CHIP_TX, STR_IDLE);
 
 					//reply
 					interface_resp_byte(cid, ERR_OK);
@@ -714,9 +710,9 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 
 	  				//config CC1200
 	  				trx_config(CHIP_RX, trx_data[CHIP_RX]);
-	  				HAL_Delay(10);
+	  				HAL_Delay(50);
 
-	  				//switch CC1200 to RX
+	  				//switch to RX
 	  				trx_write_cmd(CHIP_RX, STR_SRX);
 	  				trx_state = TRX_RX;
 
@@ -891,7 +887,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	//24kHz trigger signal from the RX CC1200
 	if(GPIO_Pin == TX_TRIG_Pin)
 	{
-		//HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
+		HAL_GPIO_TogglePin(DBG_TP1_GPIO_Port, DBG_TP1_Pin);
 
 		if (trx_state == TRX_TX)
 		{
@@ -912,7 +908,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 		}
 
 		//TODO: this is half duplex!
-		else //if (trx_state == TRX_RX)
+		else if (trx_state == TRX_RX)
 		{
 			//pending RX baseband sample retrieval
 			rx_pend = 1;
