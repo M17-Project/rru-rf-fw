@@ -49,7 +49,7 @@
 #define SHORT_TXQ_SIZE			8							//TX queue length (short messages)
 #define LONG_TXQ_SIZE   		2							//TX queue length (baseband transfers)
 #define BSB_SIZE				960							//size of baseband chunks
-#define BSB_TX_BUFF_SIZE		(40*BSB_SIZE)				//large buffer for baseband
+#define BSB_TX_BUFF_SIZE		(12*BSB_SIZE)				//large buffer for baseband
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -785,7 +785,7 @@ void handle_command(uint8_t cid, uint8_t *pld, uint16_t pld_len)
 					  circ_bsb_buff_head = (circ_bsb_buff_head+960) % BSB_TX_BUFF_SIZE;
 
 					  uint16_t fill = (circ_bsb_buff_head - circ_bsb_buff_tail + BSB_TX_BUFF_SIZE) % BSB_TX_BUFF_SIZE;
-					  if (fill >= 20 * BSB_SIZE && tx_active == 0)
+					  if (fill >= 6 * BSB_SIZE && tx_active == 0)
 					  {
 						  trx_data[CHIP_TX].pwr = 13 + (rru_settings.tx_pwr_dbm-30)*2; //TODO: fix this!
 						  trx_config(CHIP_TX, trx_data[CHIP_TX]);
